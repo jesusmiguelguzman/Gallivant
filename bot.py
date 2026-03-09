@@ -307,8 +307,7 @@ async def scrape_theflightdeal(client: httpx.AsyncClient) -> list[Deal]:
 
 # HolidayPirates — 2 feeds ────────────────────────────────────────────────────
 HOLIDAY_PIRATES_FEEDS = [
-    ("https://www.holidaypirates.com/feed",    "Europe"),
-    ("https://cruisepirates.com/feed",         "Cruise"),
+    ("https://www.holidaypirates.com/feed", "Europe"),
 ]
 
 

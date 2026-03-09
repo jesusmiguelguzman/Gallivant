@@ -95,6 +95,266 @@ SOURCE_URLS: dict[str, str] = {
     "Wandr":           "https://wandr.me",
 }
 
+# ─── Country detection ────────────────────────────────────────────────────────
+# (flag_emoji, hashtag) keyed by lowercase country name variants
+COUNTRY_MAP: dict[str, tuple[str, str]] = {
+    # Americas
+    "united states": ("🇺🇸", "#USA"), "usa": ("🇺🇸", "#USA"), "u.s.": ("🇺🇸", "#USA"),
+    "canada": ("🇨🇦", "#Canada"),
+    "mexico": ("🇲🇽", "#Mexico"), "méxico": ("🇲🇽", "#Mexico"),
+    "brazil": ("🇧🇷", "#Brazil"), "brasil": ("🇧🇷", "#Brazil"),
+    "argentina": ("🇦🇷", "#Argentina"),
+    "chile": ("🇨🇱", "#Chile"),
+    "colombia": ("🇨🇴", "#Colombia"),
+    "peru": ("🇵🇪", "#Peru"), "perú": ("🇵🇪", "#Peru"),
+    "ecuador": ("🇪🇨", "#Ecuador"),
+    "bolivia": ("🇧🇴", "#Bolivia"),
+    "venezuela": ("🇻🇪", "#Venezuela"),
+    "uruguay": ("🇺🇾", "#Uruguay"),
+    "paraguay": ("🇵🇾", "#Paraguay"),
+    "costa rica": ("🇨🇷", "#CostaRica"),
+    "panama": ("🇵🇦", "#Panama"), "panamá": ("🇵🇦", "#Panama"),
+    "cuba": ("🇨🇺", "#Cuba"),
+    "dominican republic": ("🇩🇴", "#DominicanRepublic"),
+    "puerto rico": ("🇵🇷", "#PuertoRico"),
+    "jamaica": ("🇯🇲", "#Jamaica"),
+    "bahamas": ("🇧🇸", "#Bahamas"),
+    "barbados": ("🇧🇧", "#Barbados"),
+    "trinidad": ("🇹🇹", "#Trinidad"),
+    "guatemala": ("🇬🇹", "#Guatemala"),
+    "honduras": ("🇭🇳", "#Honduras"),
+    "nicaragua": ("🇳🇮", "#Nicaragua"),
+    "el salvador": ("🇸🇻", "#ElSalvador"),
+    # Europe
+    "united kingdom": ("🇬🇧", "#UK"), "uk": ("🇬🇧", "#UK"), "britain": ("🇬🇧", "#UK"),
+    "england": ("🏴󠁧󠁢󠁥󠁮󠁧󠁿", "#England"),
+    "scotland": ("🏴󠁧󠁢󠁳󠁣󠁴󠁿", "#Scotland"),
+    "ireland": ("🇮🇪", "#Ireland"),
+    "france": ("🇫🇷", "#France"),
+    "spain": ("🇪🇸", "#Spain"), "españa": ("🇪🇸", "#Spain"),
+    "italy": ("🇮🇹", "#Italy"), "italia": ("🇮🇹", "#Italy"),
+    "germany": ("🇩🇪", "#Germany"), "deutschland": ("🇩🇪", "#Germany"),
+    "portugal": ("🇵🇹", "#Portugal"),
+    "netherlands": ("🇳🇱", "#Netherlands"), "holland": ("🇳🇱", "#Netherlands"),
+    "belgium": ("🇧🇪", "#Belgium"),
+    "switzerland": ("🇨🇭", "#Switzerland"),
+    "austria": ("🇦🇹", "#Austria"),
+    "sweden": ("🇸🇪", "#Sweden"),
+    "norway": ("🇳🇴", "#Norway"),
+    "denmark": ("🇩🇰", "#Denmark"),
+    "finland": ("🇫🇮", "#Finland"),
+    "poland": ("🇵🇱", "#Poland"),
+    "czech republic": ("🇨🇿", "#CzechRepublic"), "czechia": ("🇨🇿", "#Czechia"),
+    "greece": ("🇬🇷", "#Greece"), "grecia": ("🇬🇷", "#Greece"),
+    "croatia": ("🇭🇷", "#Croatia"),
+    "hungary": ("🇭🇺", "#Hungary"),
+    "romania": ("🇷🇴", "#Romania"),
+    "turkey": ("🇹🇷", "#Turkey"), "türkiye": ("🇹🇷", "#Turkey"),
+    "russia": ("🇷🇺", "#Russia"),
+    "ukraine": ("🇺🇦", "#Ukraine"),
+    "iceland": ("🇮🇸", "#Iceland"),
+    "malta": ("🇲🇹", "#Malta"),
+    "luxembourg": ("🇱🇺", "#Luxembourg"),
+    "slovakia": ("🇸🇰", "#Slovakia"),
+    "slovenia": ("🇸🇮", "#Slovenia"),
+    "serbia": ("🇷🇸", "#Serbia"),
+    "bulgaria": ("🇧🇬", "#Bulgaria"),
+    "latvia": ("🇱🇻", "#Latvia"),
+    "lithuania": ("🇱🇹", "#Lithuania"),
+    "estonia": ("🇪🇪", "#Estonia"),
+    # Asia
+    "japan": ("🇯🇵", "#Japan"), "japón": ("🇯🇵", "#Japan"),
+    "china": ("🇨🇳", "#China"),
+    "south korea": ("🇰🇷", "#SouthKorea"), "korea": ("🇰🇷", "#Korea"),
+    "thailand": ("🇹🇭", "#Thailand"), "tailandia": ("🇹🇭", "#Thailand"),
+    "vietnam": ("🇻🇳", "#Vietnam"),
+    "indonesia": ("🇮🇩", "#Indonesia"),
+    "philippines": ("🇵🇭", "#Philippines"), "filipinas": ("🇵🇭", "#Philippines"),
+    "malaysia": ("🇲🇾", "#Malaysia"),
+    "singapore": ("🇸🇬", "#Singapore"),
+    "india": ("🇮🇳", "#India"),
+    "nepal": ("🇳🇵", "#Nepal"),
+    "sri lanka": ("🇱🇰", "#SriLanka"),
+    "maldives": ("🇲🇻", "#Maldives"), "maldivas": ("🇲🇻", "#Maldives"),
+    "cambodia": ("🇰🇭", "#Cambodia"),
+    "myanmar": ("🇲🇲", "#Myanmar"),
+    "laos": ("🇱🇦", "#Laos"),
+    "mongolia": ("🇲🇳", "#Mongolia"),
+    "taiwan": ("🇹🇼", "#Taiwan"),
+    "hong kong": ("🇭🇰", "#HongKong"),
+    "macau": ("🇲🇴", "#Macau"),
+    "bangladesh": ("🇧🇩", "#Bangladesh"),
+    "pakistan": ("🇵🇰", "#Pakistan"),
+    "kazakhstan": ("🇰🇿", "#Kazakhstan"),
+    "uzbekistan": ("🇺🇿", "#Uzbekistan"),
+    # Middle East
+    "united arab emirates": ("🇦🇪", "#UAE"), "uae": ("🇦🇪", "#UAE"), "dubai": ("🇦🇪", "#Dubai"),
+    "saudi arabia": ("🇸🇦", "#SaudiArabia"),
+    "qatar": ("🇶🇦", "#Qatar"),
+    "israel": ("🇮🇱", "#Israel"),
+    "jordan": ("🇯🇴", "#Jordan"),
+    "egypt": ("🇪🇬", "#Egypt"), "egipto": ("🇪🇬", "#Egypt"),
+    "oman": ("🇴🇲", "#Oman"),
+    "kuwait": ("🇰🇼", "#Kuwait"),
+    "bahrain": ("🇧🇭", "#Bahrain"),
+    "lebanon": ("🇱🇧", "#Lebanon"),
+    "iran": ("🇮🇷", "#Iran"),
+    "iraq": ("🇮🇶", "#Iraq"),
+    # Africa
+    "south africa": ("🇿🇦", "#SouthAfrica"),
+    "kenya": ("🇰🇪", "#Kenya"),
+    "tanzania": ("🇹🇿", "#Tanzania"),
+    "ethiopia": ("🇪🇹", "#Ethiopia"),
+    "ghana": ("🇬🇭", "#Ghana"),
+    "nigeria": ("🇳🇬", "#Nigeria"),
+    "morocco": ("🇲🇦", "#Morocco"), "marruecos": ("🇲🇦", "#Morocco"),
+    "tunisia": ("🇹🇳", "#Tunisia"),
+    "senegal": ("🇸🇳", "#Senegal"),
+    "mozambique": ("🇲🇿", "#Mozambique"),
+    "madagascar": ("🇲🇬", "#Madagascar"),
+    "seychelles": ("🇸🇨", "#Seychelles"),
+    "mauritius": ("🇲🇺", "#Mauritius"),
+    "cape verde": ("🇨🇻", "#CapeVerde"),
+    "cameroon": ("🇨🇲", "#Cameroon"),
+    "ivory coast": ("🇨🇮", "#IvoryCoast"),
+    "zimbabwe": ("🇿🇼", "#Zimbabwe"),
+    "zambia": ("🇿🇲", "#Zambia"),
+    "botswana": ("🇧🇼", "#Botswana"),
+    "rwanda": ("🇷🇼", "#Rwanda"),
+    "uganda": ("🇺🇬", "#Uganda"),
+    # Oceania
+    "australia": ("🇦🇺", "#Australia"),
+    "new zealand": ("🇳🇿", "#NewZealand"),
+    "fiji": ("🇫🇯", "#Fiji"),
+    "hawaii": ("🇺🇸", "#Hawaii"),
+    "bali": ("🇮🇩", "#Bali"),
+    "french polynesia": ("🇵🇫", "#FrenchPolynesia"), "tahiti": ("🇵🇫", "#Tahiti"),
+    "papua new guinea": ("🇵🇬", "#PapuaNewGuinea"),
+}
+
+# Major city → country lookup
+CITY_COUNTRY: dict[str, str] = {
+    # USA
+    "new york": "united states", "nyc": "united states", "los angeles": "united states",
+    "chicago": "united states", "miami": "united states", "las vegas": "united states",
+    "san francisco": "united states", "boston": "united states", "orlando": "united states",
+    "seattle": "united states", "dallas": "united states", "houston": "united states",
+    "atlanta": "united states", "denver": "united states", "phoenix": "united states",
+    "washington": "united states", "philadelphia": "united states", "portland": "united states",
+    "minneapolis": "united states", "detroit": "united states", "baltimore": "united states",
+    "honolulu": "hawaii", "anchorage": "united states",
+    # Canada
+    "toronto": "canada", "vancouver": "canada", "montreal": "canada",
+    "calgary": "canada", "ottawa": "canada",
+    # UK
+    "london": "united kingdom", "manchester": "united kingdom", "edinburgh": "scotland",
+    "glasgow": "scotland", "birmingham": "united kingdom", "dublin": "ireland",
+    # Europe
+    "paris": "france", "nice": "france", "lyon": "france",
+    "madrid": "spain", "barcelona": "spain", "seville": "spain", "malaga": "spain",
+    "rome": "italy", "milan": "italy", "venice": "italy", "florence": "italy", "naples": "italy",
+    "berlin": "germany", "munich": "germany", "frankfurt": "germany", "hamburg": "germany",
+    "amsterdam": "netherlands",
+    "lisbon": "portugal", "porto": "portugal",
+    "brussels": "belgium",
+    "zurich": "switzerland", "geneva": "switzerland",
+    "vienna": "austria",
+    "stockholm": "sweden", "oslo": "norway", "copenhagen": "denmark", "helsinki": "finland",
+    "warsaw": "poland", "krakow": "poland",
+    "prague": "czech republic",
+    "budapest": "hungary",
+    "bucharest": "romania",
+    "athens": "greece", "santorini": "greece", "mykonos": "greece",
+    "dubrovnik": "croatia", "split": "croatia",
+    "reykjavik": "iceland",
+    "istanbul": "turkey", "ankara": "turkey",
+    "moscow": "russia", "st. petersburg": "russia",
+    # Asia
+    "tokyo": "japan", "osaka": "japan", "kyoto": "japan",
+    "beijing": "china", "shanghai": "china", "guangzhou": "china", "shenzhen": "china",
+    "seoul": "south korea", "busan": "south korea",
+    "bangkok": "thailand", "phuket": "thailand", "chiang mai": "thailand",
+    "hanoi": "vietnam", "ho chi minh": "vietnam", "danang": "vietnam",
+    "bali": "indonesia", "jakarta": "indonesia",
+    "manila": "philippines", "cebu": "philippines",
+    "kuala lumpur": "malaysia", "penang": "malaysia",
+    "singapore": "singapore",
+    "mumbai": "india", "delhi": "india", "goa": "india",
+    "kathmandu": "nepal",
+    "colombo": "sri lanka",
+    "male": "maldives",
+    "siem reap": "cambodia", "phnom penh": "cambodia",
+    "taipei": "taiwan",
+    "hong kong": "hong kong",
+    "ulaanbaatar": "mongolia",
+    # Middle East
+    "dubai": "united arab emirates", "abu dhabi": "united arab emirates",
+    "riyadh": "saudi arabia", "jeddah": "saudi arabia",
+    "doha": "qatar",
+    "tel aviv": "israel", "jerusalem": "israel",
+    "amman": "jordan", "petra": "jordan",
+    "cairo": "egypt", "luxor": "egypt",
+    "muscat": "oman",
+    # Africa
+    "cape town": "south africa", "johannesburg": "south africa",
+    "nairobi": "kenya",
+    "dar es salaam": "tanzania", "zanzibar": "tanzania",
+    "addis ababa": "ethiopia",
+    "accra": "ghana",
+    "casablanca": "morocco", "marrakech": "morocco", "marrakesh": "morocco",
+    "tunis": "tunisia",
+    "dakar": "senegal",
+    "victoria": "seychelles",
+    "port louis": "mauritius",
+    # Latam
+    "bogota": "colombia", "bogotá": "colombia", "medellín": "colombia",
+    "lima": "peru",
+    "santiago": "chile",
+    "buenos aires": "argentina",
+    "sao paulo": "brazil", "são paulo": "brazil", "rio de janeiro": "brazil", "rio": "brazil",
+    "montevideo": "uruguay",
+    "quito": "ecuador",
+    "la paz": "bolivia",
+    "caracas": "venezuela",
+    "asuncion": "paraguay",
+    "cancun": "mexico", "cancún": "mexico", "mexico city": "mexico", "guadalajara": "mexico",
+    "san jose": "costa rica",
+    "panama city": "panama",
+    "havana": "cuba",
+    "santo domingo": "dominican republic", "punta cana": "dominican republic",
+    "san juan": "puerto rico",
+    "kingston": "jamaica",
+    "nassau": "bahamas",
+    # Oceania
+    "sydney": "australia", "melbourne": "australia", "brisbane": "australia", "perth": "australia",
+    "auckland": "new zealand", "queenstown": "new zealand",
+    "nadi": "fiji",
+    "papeete": "french polynesia",
+}
+
+
+def detect_country(text: str) -> tuple[str, str] | None:
+    """Return (flag_emoji, hashtag) for the most relevant country found in text."""
+    tl = text.lower()
+
+    # First pass: direct country name match (longest match wins)
+    best: tuple[str, str] | None = None
+    best_len = 0
+    for name, (flag, tag) in COUNTRY_MAP.items():
+        if name in tl and len(name) > best_len:
+            best = (flag, tag)
+            best_len = len(name)
+    if best:
+        return best
+
+    # Second pass: city → country lookup
+    for city, country_key in CITY_COUNTRY.items():
+        if city in tl and country_key in COUNTRY_MAP:
+            return COUNTRY_MAP[country_key]
+
+    return None
+
+
 DEAL_TYPE_RULES: list[tuple[str, list[str]]] = [
     ("Crucero",  ["cruise", "crucero", "ship", "sailing", "carnival", "norwegian", "royal caribbean", "msc ", "celebrity cruise"]),
     ("Hotel",    ["hotel", "resort", "hostel", "inn", "lodge", "motel", "accommodation", "stay", "nights", "night stay", "airbnb"]),
@@ -208,14 +468,15 @@ DEAL_TYPE_EMOJIS = {
 
 
 async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
-    r_emoji    = region_emoji(deal.region)
     type_emoji = DEAL_TYPE_EMOJIS.get(deal.deal_type, "🔖")
     source_url = SOURCE_URLS.get(deal.source, "")
 
-    # For Reddit sources like "Reddit r/flightdeals" extract the base URL
     if deal.source.startswith("Reddit"):
         sub = deal.source.split("/")[-1] if "/" in deal.source else "flightdeals"
         source_url = f"https://www.reddit.com/r/{sub}"
+
+    full_text = f"{deal.title} {deal.description}"
+    country   = detect_country(full_text)
 
     parts = []
     if deal.is_error_fare:
@@ -225,8 +486,14 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
         f"{type_emoji} *{md_esc(deal.title)}*",
         "",
         f"💰 *Precio:* {md_esc(deal.price)}",
-        f"{r_emoji} *Destino:* {deal.region.title()}",
         f"🏷️ *Tipo:* {deal.deal_type}",
+    ]
+
+    if country:
+        flag, hashtag = country
+        parts.append(f"{flag} {hashtag}")
+
+    parts += [
         f"📡 *Fuente:* [{deal.source}]({source_url})" if source_url else f"📡 *Fuente:* {deal.source}",
         "",
         f"🔗 [Ver y reservar]({deal.url})",

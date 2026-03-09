@@ -622,7 +622,7 @@ HOME_KEYBOARD = {
             {"text": "🔍 Mulling",       "callback_data": "menu:mulling"},
         ],
         [
-            {"text": "🗺️ Wandering",    "callback_data": "menu:wandering"},
+            {"text": "📖 Wandering",    "callback_data": "menu:wandering"},
         ],
     ]
 }
@@ -896,6 +896,7 @@ _WANDERING_TEXT = (
     "🛫 *Skedaddling* — ver los deals de hoy\n"
     "🔕 *Lollygagging* — pausar o reactivar alertas\n"
     "🗺️ *Meandering* — mis rutas favoritas _(próximamente)_\n"
+    "📖 *Wandering* — este glosario\n"
     "🔍 *Mulling* — estado del bot\n"
     "🔕 *Ghosting* — silenciar un deal puntual\n"
     "✈️ *Gallivanting* — volver al inicio\n\n"

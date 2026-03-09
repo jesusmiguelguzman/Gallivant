@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Gallivant Bot — Hunts cheap flights & error fares across multiple sources.
+Gallivant — Hunts cheap flights & error fares across multiple sources.
 Sends Telegram alerts in real time when new deals are found.
 
 Sources: SecretFlying, Fly4free, TheFlightDeal, HolidayPirates,
@@ -457,7 +457,7 @@ async def run_poll() -> None:
 
 
 async def main() -> None:
-    log.info("✈️  Gallivant Bot started")
+    log.info("✈️  Gallivant started")
     while True:
         try:
             await run_poll()

@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Gallivant — Hunts cheap flights & error fares across multiple sources.
+Gallivant — Hunts cheap flights, cruises & hotel error fares across multiple sources.
 Sends Telegram alerts in real time when new deals are found.
 
-Sources (RSS):   SecretFlying, Fly4free, TheFlightDeal, HolidayPirates,
-                 Airfarewatchdog, Travelzoo, ThePointsGuy, ViewFromTheWing,
-                 OneMilleAtATime
-Sources (scrape): ManyFlights, Flightlist, Wandr
+RSS sources:  SecretFlying (10 feeds), Fly4free (6), TheFlightDeal (2),
+              HolidayPirates (2), ThePointsGuy, ViewFromTheWing, OneMilleAtATime,
+              Travelzoo (3)
+JS sources:   Airfarewatchdog (Playwright)
+JSON API:     Reddit (r/flightdeals, r/Flights, r/CruiseDeals, r/HotelDeals,
+                      r/travel, r/solotravel, r/awardtravel, r/churning)
+Scrape:       ManyFlights, Flightlist, Wandr
 """
 
 import asyncio
@@ -16,12 +19,13 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 BOT_TOKEN     = os.environ["BOT_TOKEN"]
@@ -37,7 +41,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 STATE_FILE = DATA_DIR / "seen_deals.json"
-MAX_SEEN   = 8_000
+MAX_SEEN   = 10_000
 
 HEADERS = {
     "User-Agent": (
@@ -48,6 +52,11 @@ HEADERS = {
     "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
+}
+
+REDDIT_HEADERS = {
+    "User-Agent": "Gallivant/1.0 (flight deal alert bot; contact via github.com/jesusmiguelguzman/Gallivant)",
+    "Accept": "application/json",
 }
 
 # ─── Model ────────────────────────────────────────────────────────────────────
@@ -65,15 +74,15 @@ class Deal:
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 ERROR_KEYWORDS = {
-    "error fare", "mistake fare", "mistake", "glitch",
-    "accidental", "misfiled", "pricing error", "error fares",
+    "error fare", "mistake fare", "mistake", "glitch", "accidental",
+    "misfiled", "pricing error", "error fares", "mistake deal",
 }
 
-# Keywords that indicate a post is about a flight deal (used to filter general blogs)
 DEAL_KEYWORDS = {
     "flight", "fare", "airline", "fly", "roundtrip", "round trip",
-    "nonstop", "nonstop", "airfare", "cheap", "deal", "sale",
-    "$", "€", "£", "usd", "eur", "gbp",
+    "airfare", "cheap", "deal", "sale", "cruise", "hotel", "resort",
+    "nonstop", "$", "€", "£", "usd", "eur", "gbp", "off", "discount",
+    "book now", "limited time", "flash sale",
 }
 
 REGION_EMOJIS = {
@@ -88,6 +97,7 @@ REGION_EMOJIS = {
     "oceania":       "🌊",
     "middle east":   "🕌",
     "cruise":        "🚢",
+    "hotel":         "🏨",
     "global":        "🌐",
 }
 
@@ -101,8 +111,7 @@ def is_error_fare(text: str) -> bool:
     return any(kw in tl for kw in ERROR_KEYWORDS)
 
 
-def is_flight_deal(text: str) -> bool:
-    """Returns True if the text seems to be about a flight deal."""
+def is_travel_deal(text: str) -> bool:
     tl = text.lower()
     return any(kw in tl for kw in DEAL_KEYWORDS)
 
@@ -176,7 +185,7 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
     })
     resp.raise_for_status()
 
-# ─── RSS core (httpx-powered — bypasses User-Agent blocks like SecretFlying) ──
+# ─── RSS core (httpx-powered — bypasses User-Agent blocks) ────────────────────
 
 async def fetch_rss_entries(
     client: httpx.AsyncClient,
@@ -184,8 +193,7 @@ async def fetch_rss_entries(
     *,
     limit: int = 30,
 ) -> list:
-    """Fetch RSS via httpx with browser headers, parse with feedparser."""
-    r = await client.get(url, headers=HEADERS, timeout=25)
+    r = await client.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     feed = feedparser.parse(r.text)
     return feed.entries[:limit]
@@ -198,19 +206,17 @@ def entry_to_deal(
     *,
     force_error: bool = False,
     deal_filter: bool = False,
-) -> Deal | None:
+) -> "Deal | None":
     title   = entry.get("title", "").strip()
     url     = entry.get("link",  "").strip()
     summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text(" ", strip=True)
-    pub     = entry.get("published", datetime.utcnow().isoformat())
+    pub     = entry.get("published", datetime.now(timezone.utc).isoformat())
 
     if not title or not url:
         return None
 
     full = f"{title} {summary}"
-
-    # For general blogs, only keep if it looks like a flight deal
-    if deal_filter and not is_flight_deal(full):
+    if deal_filter and not is_travel_deal(full):
         return None
 
     return Deal(
@@ -225,9 +231,9 @@ def entry_to_deal(
         description   = summary[:300],
     )
 
-# ─── Scrapers ─────────────────────────────────────────────────────────────────
+# ─── RSS Scrapers ─────────────────────────────────────────────────────────────
 
-# SecretFlying ── 10 feeds (fixed: now uses httpx instead of feedparser directly)
+# SecretFlying — 10 feeds ──────────────────────────────────────────────────────
 SECRET_FLYING_FEEDS = [
     ("https://www.secretflying.com/posts/category/usa-canada/feed/",    "USA",           False),
     ("https://www.secretflying.com/posts/category/europe/feed/",        "Europe",        False),
@@ -255,7 +261,7 @@ async def scrape_secretflying(client: httpx.AsyncClient) -> list[Deal]:
     return deals
 
 
-# Fly4free ──────────────────────────────────────────────────────────────────────
+# Fly4free — 6 feeds ───────────────────────────────────────────────────────────
 FLY4FREE_FEEDS = [
     ("https://www.fly4free.com/feed/",                                       "Global",    False),
     ("https://www.fly4free.com/flight-deals/north-america/feed/",            "USA",       False),
@@ -279,7 +285,7 @@ async def scrape_fly4free(client: httpx.AsyncClient) -> list[Deal]:
     return deals
 
 
-# TheFlightDeal ─────────────────────────────────────────────────────────────────
+# TheFlightDeal — 2 feeds ──────────────────────────────────────────────────────
 THE_FLIGHT_DEAL_FEEDS = [
     ("https://www.theflightdeal.com/feed/",                     "USA",    False),
     ("https://www.theflightdeal.com/category/error-fare/feed/", "Global", True),
@@ -299,10 +305,10 @@ async def scrape_theflightdeal(client: httpx.AsyncClient) -> list[Deal]:
     return deals
 
 
-# HolidayPirates ────────────────────────────────────────────────────────────────
+# HolidayPirates — 2 feeds ────────────────────────────────────────────────────
 HOLIDAY_PIRATES_FEEDS = [
-    ("https://us.holidaypirates.com/feed",  "USA"),
-    ("https://www.holidaypirates.com/feed", "Europe"),
+    ("https://www.holidaypirates.com/feed",    "Europe"),
+    ("https://cruisepirates.com/feed",         "Cruise"),
 ]
 
 
@@ -319,37 +325,203 @@ async def scrape_holidaypirates(client: httpx.AsyncClient) -> list[Deal]:
     return deals
 
 
-# Airfarewatchdog ───────────────────────────────────────────────────────────────
-AIRFAREWATCHDOG_FEEDS = [
-    ("https://www.airfarewatchdog.com/blog/feed/",        "USA"),
-    ("https://www.airfarewatchdog.com/cheap-flights/rss/","USA"),
+# Travelzoo — 3 feeds ─────────────────────────────────────────────────────────
+TRAVELZOO_FEEDS = [
+    ("https://www.travelzoo.com/rss/deals/flights/",        "Global"),
+    ("https://www.travelzoo.com/rss/deals/flights/us/",     "USA"),
+    ("https://www.travelzoo.com/rss/deals/flights/europe/", "Europe"),
+    ("https://www.travelzoo.com/rss/deals/hotels/",         "Hotel"),
+    ("https://www.travelzoo.com/rss/deals/cruises/",        "Cruise"),
 ]
 
 
-async def scrape_airfarewatchdog(client: httpx.AsyncClient) -> list[Deal]:
-    # Try RSS first, fall back to scraping
-    for feed_url, region in AIRFAREWATCHDOG_FEEDS:
+async def scrape_travelzoo(client: httpx.AsyncClient) -> list[Deal]:
+    deals: list[Deal] = []
+    for url, region in TRAVELZOO_FEEDS:
         try:
-            entries = await fetch_rss_entries(client, feed_url)
-            if entries:
-                d = [e for e in (entry_to_deal(e, "Airfarewatchdog", region) for e in entries) if e]
-                log.info(f"  Airfarewatchdog RSS: {len(d)}")
-                return d
-        except Exception:
-            pass
+            entries = await fetch_rss_entries(client, url)
+            d = [e for e in (entry_to_deal(e, "Travelzoo", region) for e in entries) if e]
+            deals.extend(d)
+            log.info(f"  Travelzoo [{region}]: {len(d)}")
+        except Exception as exc:
+            log.warning(f"  Travelzoo [{region}] failed: {exc}")
+    return deals
 
-    # Scraping fallback
+
+# ThePointsGuy — deal-filtered ────────────────────────────────────────────────
+TPG_FEEDS = [
+    ("https://thepointsguy.com/feed/",              "Global"),
+    ("https://thepointsguy.com/deals/feed/",        "Global"),
+    ("https://thepointsguy.com/guide/cheap-flights/feed/", "Global"),
+]
+
+
+async def scrape_thepointsguy(client: httpx.AsyncClient) -> list[Deal]:
+    deals: list[Deal] = []
+    for url, region in TPG_FEEDS:
+        try:
+            entries = await fetch_rss_entries(client, url)
+            d = [e for e in (entry_to_deal(e, "ThePointsGuy", region, deal_filter=True) for e in entries) if e]
+            deals.extend(d)
+            log.info(f"  ThePointsGuy [{url.split('/')[-2]}]: {len(d)}")
+        except Exception as exc:
+            log.warning(f"  ThePointsGuy [{url}] failed: {exc}")
+    return deals
+
+
+# View from the Wing — deal-filtered ──────────────────────────────────────────
+async def scrape_viewfromthewing(client: httpx.AsyncClient) -> list[Deal]:
+    feeds = [
+        ("https://viewfromthewing.com/feed/",                          "Global"),
+        ("https://viewfromthewing.com/category/deals/feed/",           "Global"),
+        ("https://viewfromthewing.com/category/airfare-deals/feed/",   "Global"),
+    ]
+    deals: list[Deal] = []
+    for url, region in feeds:
+        try:
+            entries = await fetch_rss_entries(client, url)
+            d = [e for e in (entry_to_deal(e, "ViewFromTheWing", region, deal_filter=True) for e in entries) if e]
+            deals.extend(d)
+            log.info(f"  ViewFromTheWing [{url.split('/')[-2]}]: {len(d)}")
+        except Exception as exc:
+            log.warning(f"  ViewFromTheWing [{url}] failed: {exc}")
+    return deals
+
+
+# One Mile at a Time — deal-filtered ──────────────────────────────────────────
+async def scrape_onemileatatime(client: httpx.AsyncClient) -> list[Deal]:
+    feeds = [
+        ("https://onemileatatime.com/feed/",                         "Global"),
+        ("https://onemileatatime.com/category/deals/feed/",          "Global"),
+        ("https://onemileatatime.com/category/flight-deals/feed/",   "Global"),
+    ]
+    deals: list[Deal] = []
+    for url, region in feeds:
+        try:
+            entries = await fetch_rss_entries(client, url)
+            d = [e for e in (entry_to_deal(e, "OneMilleAtATime", region, deal_filter=True) for e in entries) if e]
+            deals.extend(d)
+            log.info(f"  OneMilleAtATime [{url.split('/')[-2]}]: {len(d)}")
+        except Exception as exc:
+            log.warning(f"  OneMilleAtATime [{url}] failed: {exc}")
+    return deals
+
+# ─── Reddit JSON API ──────────────────────────────────────────────────────────
+
+REDDIT_SUBS = [
+    # (subreddit, region, force_error, deal_filter)
+    ("flightdeals",  "Global", False, False),   # 100% deals
+    ("Flights",      "Global", False, True),    # mixed, filter
+    ("CruiseDeals",  "Cruise", False, False),   # 100% cruise deals
+    ("HotelDeals",   "Hotel",  False, False),   # 100% hotel deals
+    ("travel",       "Global", False, True),    # filter
+    ("solotravel",   "Global", False, True),    # filter
+    ("awardtravel",  "Global", False, True),    # filter
+    ("churning",     "Global", False, True),    # credit card deals, filter
+    ("vacationdeals","Global", False, False),   # 100% deals
+    ("deals",        "Global", False, True),    # broad, filter for travel
+]
+
+
+async def scrape_reddit(client: httpx.AsyncClient) -> list[Deal]:
+    deals: list[Deal] = []
+    for sub, region, force_error, deal_filter in REDDIT_SUBS:
+        url = f"https://www.reddit.com/r/{sub}/new.json?limit=25"
+        try:
+            r = await client.get(url, headers=REDDIT_HEADERS, timeout=20)
+            r.raise_for_status()
+            posts = r.json()["data"]["children"]
+            sub_deals: list[Deal] = []
+
+            for post in posts:
+                p     = post["data"]
+                title = p.get("title", "").strip()
+                href  = f"https://reddit.com{p.get('permalink', '')}"
+                body  = p.get("selftext", "")[:500]
+                full  = f"{title} {body}"
+
+                if deal_filter and not is_travel_deal(full):
+                    continue
+
+                # Skip meta/mod posts
+                if any(kw in title.lower() for kw in ("weekly thread", "megathread", "discussion", "question", "mod post")):
+                    continue
+
+                pub = datetime.fromtimestamp(
+                    p.get("created_utc", 0), tz=timezone.utc
+                ).isoformat()
+
+                sub_deals.append(Deal(
+                    deal_id       = make_id("reddit", p.get("id", href)),
+                    source        = f"Reddit r/{sub}",
+                    title         = title,
+                    url           = href,
+                    price         = extract_price(full),
+                    region        = region,
+                    is_error_fare = force_error or is_error_fare(full),
+                    published     = pub,
+                    description   = body[:300],
+                ))
+
+            deals.extend(sub_deals)
+            log.info(f"  Reddit r/{sub}: {len(sub_deals)}")
+            await asyncio.sleep(0.5)   # Reddit rate limit
+
+        except Exception as exc:
+            log.warning(f"  Reddit r/{sub} failed: {exc}")
+
+    return deals
+
+# ─── Playwright scrapers (JavaScript-heavy sites) ─────────────────────────────
+
+async def fetch_with_playwright(url: str, wait: str = "networkidle") -> str:
+    """Render a JS-heavy page and return its HTML."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        ctx     = await browser.new_context(user_agent=HEADERS["User-Agent"])
+        page    = await ctx.new_page()
+        await page.goto(url, timeout=40_000, wait_until=wait)
+        await page.wait_for_timeout(3000)   # let JS settle
+        html = await page.content()
+        await browser.close()
+    return html
+
+
+async def scrape_airfarewatchdog(_: httpx.AsyncClient) -> list[Deal]:
     try:
-        r    = await client.get("https://www.airfarewatchdog.com/cheap-flights/", headers=HEADERS, timeout=20)
-        soup = BeautifulSoup(r.text, "html.parser")
+        html = await fetch_with_playwright("https://www.airfarewatchdog.com/cheap-flights/")
+        soup = BeautifulSoup(html, "html.parser")
         deals: list[Deal] = []
 
         cards = []
-        for sel in ("article.deal", ".deal-card", ".fare-deal",
-                    "[class*='DealCard']", "[class*='deal-item']"):
+        for sel in (
+            "article.deal", ".deal-card", ".fare-deal",
+            "[class*='DealCard']", "[class*='deal-item']",
+            "[class*='FareDeal']", "[data-testid*='deal']",
+        ):
             cards = soup.select(sel)
             if cards:
                 break
+
+        # Fallback: any link that contains a price
+        if not cards:
+            for a in soup.select("a[href]")[:60]:
+                text = a.get_text(" ", strip=True)
+                if extract_price(text) != "Ver oferta" and len(text) > 15:
+                    title = text[:120]
+                    href  = a["href"]
+                    if not href.startswith("http"):
+                        href = "https://www.airfarewatchdog.com" + href
+                    deals.append(Deal(
+                        deal_id       = make_id("airfarewatchdog", href),
+                        source        = "Airfarewatchdog",
+                        title         = title,
+                        url           = href,
+                        price         = extract_price(text),
+                        region        = "USA",
+                        is_error_fare = is_error_fare(title),
+                        published     = datetime.now(timezone.utc).isoformat(),
+                    ))
 
         for card in cards[:25]:
             title_el = card.select_one("h2, h3, [class*='title']")
@@ -372,80 +544,17 @@ async def scrape_airfarewatchdog(client: httpx.AsyncClient) -> list[Deal]:
                 price         = price,
                 region        = "USA",
                 is_error_fare = is_error_fare(title),
-                published     = datetime.utcnow().isoformat(),
+                published     = datetime.now(timezone.utc).isoformat(),
             ))
 
-        log.info(f"  Airfarewatchdog scrape: {len(deals)}")
+        log.info(f"  Airfarewatchdog: {len(deals)}")
         return deals
     except Exception as exc:
         log.warning(f"  Airfarewatchdog failed: {exc}")
         return []
 
+# ─── HTTP Scrapers ────────────────────────────────────────────────────────────
 
-# Travelzoo ─────────────────────────────────────────────────────────────────────
-TRAVELZOO_FEEDS = [
-    ("https://www.travelzoo.com/rss/deals/flights/",         "Global"),
-    ("https://www.travelzoo.com/rss/deals/flights/us/",      "USA"),
-    ("https://www.travelzoo.com/rss/deals/flights/europe/",  "Europe"),
-]
-
-
-async def scrape_travelzoo(client: httpx.AsyncClient) -> list[Deal]:
-    deals: list[Deal] = []
-    for url, region in TRAVELZOO_FEEDS:
-        try:
-            entries = await fetch_rss_entries(client, url)
-            d = [e for e in (entry_to_deal(e, "Travelzoo", region) for e in entries) if e]
-            deals.extend(d)
-            log.info(f"  Travelzoo [{region}]: {len(d)}")
-        except Exception as exc:
-            log.warning(f"  Travelzoo [{region}] failed: {exc}")
-    return deals
-
-
-# ThePointsGuy ─── filtered to flight deals only ──────────────────────────────
-async def scrape_thepointsguy(client: httpx.AsyncClient) -> list[Deal]:
-    feeds = [
-        ("https://thepointsguy.com/deals/airlines/feed/", "Global"),
-        ("https://thepointsguy.com/news/feed/",           "Global"),
-    ]
-    deals: list[Deal] = []
-    for url, region in feeds:
-        try:
-            entries = await fetch_rss_entries(client, url)
-            d = [e for e in (entry_to_deal(e, "ThePointsGuy", region, deal_filter=True) for e in entries) if e]
-            deals.extend(d)
-            log.info(f"  ThePointsGuy: {len(d)}")
-        except Exception as exc:
-            log.warning(f"  ThePointsGuy failed: {exc}")
-    return deals
-
-
-# View from the Wing ─── filtered to flight deals only ───────────────────────
-async def scrape_viewfromthewing(client: httpx.AsyncClient) -> list[Deal]:
-    try:
-        entries = await fetch_rss_entries(client, "https://viewfromthewing.com/feed/")
-        d = [e for e in (entry_to_deal(e, "ViewFromTheWing", "Global", deal_filter=True) for e in entries) if e]
-        log.info(f"  ViewFromTheWing: {len(d)}")
-        return d
-    except Exception as exc:
-        log.warning(f"  ViewFromTheWing failed: {exc}")
-        return []
-
-
-# One Mile at a Time ─── filtered to flight deals only ───────────────────────
-async def scrape_onemileatatime(client: httpx.AsyncClient) -> list[Deal]:
-    try:
-        entries = await fetch_rss_entries(client, "https://onemileatatime.com/feed/")
-        d = [e for e in (entry_to_deal(e, "OneMilleAtATime", "Global", deal_filter=True) for e in entries) if e]
-        log.info(f"  OneMilleAtATime: {len(d)}")
-        return d
-    except Exception as exc:
-        log.warning(f"  OneMilleAtATime failed: {exc}")
-        return []
-
-
-# ManyFlights ───────────────────────────────────────────────────────────────────
 async def scrape_manyflights(client: httpx.AsyncClient) -> list[Deal]:
     try:
         r    = await client.get("https://manyflights.io/", headers=HEADERS, timeout=20)
@@ -473,7 +582,7 @@ async def scrape_manyflights(client: httpx.AsyncClient) -> list[Deal]:
                 price         = price,
                 region        = "Global",
                 is_error_fare = is_error_fare(title),
-                published     = datetime.utcnow().isoformat(),
+                published     = datetime.now(timezone.utc).isoformat(),
             ))
 
         log.info(f"  ManyFlights: {len(deals)}")
@@ -483,7 +592,6 @@ async def scrape_manyflights(client: httpx.AsyncClient) -> list[Deal]:
         return []
 
 
-# Flightlist ────────────────────────────────────────────────────────────────────
 async def scrape_flightlist(client: httpx.AsyncClient) -> list[Deal]:
     for page_url in ("https://www.flightlist.io/deals", "https://www.flightlist.io/"):
         try:
@@ -512,7 +620,7 @@ async def scrape_flightlist(client: httpx.AsyncClient) -> list[Deal]:
                     price         = price,
                     region        = "Global",
                     is_error_fare = is_error_fare(title),
-                    published     = datetime.utcnow().isoformat(),
+                    published     = datetime.now(timezone.utc).isoformat(),
                 ))
 
             if deals:
@@ -524,10 +632,8 @@ async def scrape_flightlist(client: httpx.AsyncClient) -> list[Deal]:
     return []
 
 
-# Wandr ─────────────────────────────────────────────────────────────────────────
 async def scrape_wandr(client: httpx.AsyncClient) -> list[Deal]:
-    urls = ["https://wandr.me/", "https://wandr.me/deals"]
-    for url in urls:
+    for url in ("https://wandr.me/deals", "https://wandr.me/"):
         try:
             r    = await client.get(url, headers=HEADERS, timeout=20)
             soup = BeautifulSoup(r.text, "html.parser")
@@ -554,7 +660,7 @@ async def scrape_wandr(client: httpx.AsyncClient) -> list[Deal]:
                     price         = price,
                     region        = "Global",
                     is_error_fare = is_error_fare(title),
-                    published     = datetime.utcnow().isoformat(),
+                    published     = datetime.now(timezone.utc).isoformat(),
                 ))
 
             if deals:
@@ -571,11 +677,12 @@ SCRAPERS = [
     ("Fly4free",        scrape_fly4free),
     ("TheFlightDeal",   scrape_theflightdeal),
     ("HolidayPirates",  scrape_holidaypirates),
-    ("Airfarewatchdog", scrape_airfarewatchdog),
     ("Travelzoo",       scrape_travelzoo),
     ("ThePointsGuy",    scrape_thepointsguy),
     ("ViewFromTheWing", scrape_viewfromthewing),
     ("OneMilleAtATime", scrape_onemileatatime),
+    ("Reddit",          scrape_reddit),
+    ("Airfarewatchdog", scrape_airfarewatchdog),   # Playwright — runs last
     ("ManyFlights",     scrape_manyflights),
     ("Flightlist",      scrape_flightlist),
     ("Wandr",           scrape_wandr),
@@ -586,7 +693,7 @@ async def run_poll() -> None:
     seen         = load_seen()
     is_first_run = len(seen) == 0
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
         all_deals: list[Deal] = []
 
         for name, scraper in SCRAPERS:

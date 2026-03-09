@@ -68,6 +68,7 @@ class Deal:
     url:           str
     price:         str
     region:        str
+    deal_type:     str        # "Vuelo", "Hotel", "Crucero", "Paquete", "Millas", "Deal"
     is_error_fare: bool
     published:     str
     description:   str = ""
@@ -77,6 +78,42 @@ ERROR_KEYWORDS = {
     "error fare", "mistake fare", "mistake", "glitch", "accidental",
     "misfiled", "pricing error", "error fares", "mistake deal",
 }
+
+# Source homepage URLs for the "Fuente" link
+SOURCE_URLS: dict[str, str] = {
+    "SecretFlying":    "https://www.secretflying.com",
+    "Fly4free":        "https://www.fly4free.com",
+    "TheFlightDeal":   "https://www.theflightdeal.com",
+    "HolidayPirates":  "https://www.holidaypirates.com",
+    "Travelzoo":       "https://www.travelzoo.com",
+    "ThePointsGuy":    "https://thepointsguy.com",
+    "ViewFromTheWing": "https://viewfromthewing.com",
+    "OneMilleAtATime": "https://onemileatatime.com",
+    "Airfarewatchdog": "https://www.airfarewatchdog.com",
+    "ManyFlights":     "https://manyflights.io",
+    "Flightlist":      "https://www.flightlist.io",
+    "Wandr":           "https://wandr.me",
+}
+
+DEAL_TYPE_RULES: list[tuple[str, list[str]]] = [
+    ("Crucero",  ["cruise", "crucero", "ship", "sailing", "carnival", "norwegian", "royal caribbean", "msc ", "celebrity cruise"]),
+    ("Hotel",    ["hotel", "resort", "hostel", "inn", "lodge", "motel", "accommodation", "stay", "nights", "night stay", "airbnb"]),
+    ("Paquete",  ["package", "vacation package", "holiday package", "all-inclusive", "all inclusive", "bundle"]),
+    ("Millas",   ["miles", "points", "millas", "puntos", "award", "redemption", "bonus miles", "frequent flyer"]),
+    ("Vuelo",    ["flight", "fly", "airline", "airfare", "roundtrip", "round trip", "nonstop", "one-way", "departure", "→", "->", " to "]),
+]
+
+
+def detect_deal_type(text: str, region: str) -> str:
+    if region.lower() == "cruise":
+        return "Crucero"
+    if region.lower() == "hotel":
+        return "Hotel"
+    tl = text.lower()
+    for dtype, keywords in DEAL_TYPE_RULES:
+        if any(kw in tl for kw in keywords):
+            return dtype
+    return "Deal"
 
 DEAL_KEYWORDS = {
     "flight", "fare", "airline", "fly", "roundtrip", "round trip",
@@ -160,19 +197,37 @@ def save_seen(seen: set[str]) -> None:
 TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
-async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
-    emoji = region_emoji(deal.region)
-    parts = []
+DEAL_TYPE_EMOJIS = {
+    "Vuelo":   "✈️",
+    "Hotel":   "🏨",
+    "Crucero": "🚢",
+    "Paquete": "🧳",
+    "Millas":  "🎯",
+    "Deal":    "🔖",
+}
 
+
+async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
+    r_emoji    = region_emoji(deal.region)
+    type_emoji = DEAL_TYPE_EMOJIS.get(deal.deal_type, "🔖")
+    source_url = SOURCE_URLS.get(deal.source, "")
+
+    # For Reddit sources like "Reddit r/flightdeals" extract the base URL
+    if deal.source.startswith("Reddit"):
+        sub = deal.source.split("/")[-1] if "/" in deal.source else "flightdeals"
+        source_url = f"https://www.reddit.com/r/{sub}"
+
+    parts = []
     if deal.is_error_fare:
         parts += ["🚨 *ERROR FARE* 🚨", ""]
 
     parts += [
-        f"{emoji} *{md_esc(deal.title)}*",
+        f"{type_emoji} *{md_esc(deal.title)}*",
         "",
-        f"💰 {md_esc(deal.price)}",
-        f"🗺️ Región: {deal.region.title()}",
-        f"📡 Fuente: {deal.source}",
+        f"💰 *Precio:* {md_esc(deal.price)}",
+        f"{r_emoji} *Destino:* {deal.region.title()}",
+        f"🏷️ *Tipo:* {deal.deal_type}",
+        f"📡 *Fuente:* [{deal.source}]({source_url})" if source_url else f"📡 *Fuente:* {deal.source}",
         "",
         f"🔗 [Ver y reservar]({deal.url})",
     ]
@@ -226,6 +281,7 @@ def entry_to_deal(
         url           = url,
         price         = extract_price(full),
         region        = region,
+        deal_type     = detect_deal_type(full, region),
         is_error_fare = force_error or is_error_fare(full),
         published     = pub,
         description   = summary[:300],
@@ -235,16 +291,12 @@ def entry_to_deal(
 
 # SecretFlying — 10 feeds ──────────────────────────────────────────────────────
 SECRET_FLYING_FEEDS = [
-    ("https://www.secretflying.com/posts/category/usa-canada/feed/",    "USA",           False),
-    ("https://www.secretflying.com/posts/category/europe/feed/",        "Europe",        False),
-    ("https://www.secretflying.com/posts/category/asia/feed/",          "Asia",          False),
-    ("https://www.secretflying.com/posts/category/caribbean/feed/",     "Caribbean",     False),
-    ("https://www.secretflying.com/posts/category/latin-america/feed/", "Latin-America", False),
-    ("https://www.secretflying.com/posts/category/africa/feed/",        "Africa",        False),
-    ("https://www.secretflying.com/posts/category/middle-east/feed/",   "Middle East",   False),
-    ("https://www.secretflying.com/posts/category/oceania/feed/",       "Oceania",       False),
-    ("https://www.secretflying.com/posts/category/error-fares/feed/",   "Global",        True),
-    ("https://www.secretflying.com/posts/category/cruises/feed/",       "Cruise",        False),
+    ("https://www.secretflying.com/posts/category/europe/feed/",      "Europe",      False),
+    ("https://www.secretflying.com/posts/category/asia/feed/",        "Asia",        False),
+    ("https://www.secretflying.com/posts/category/caribbean/feed/",   "Caribbean",   False),
+    ("https://www.secretflying.com/posts/category/africa/feed/",      "Africa",      False),
+    ("https://www.secretflying.com/posts/category/middle-east/feed/", "Middle East", False),
+    ("https://www.secretflying.com/posts/category/oceania/feed/",     "Oceania",     False),
 ]
 
 
@@ -263,12 +315,9 @@ async def scrape_secretflying(client: httpx.AsyncClient) -> list[Deal]:
 
 # Fly4free — 6 feeds ───────────────────────────────────────────────────────────
 FLY4FREE_FEEDS = [
-    ("https://www.fly4free.com/feed/",                                       "Global",    False),
-    ("https://www.fly4free.com/flight-deals/north-america/feed/",            "USA",       False),
-    ("https://www.fly4free.com/flight-deals/europe/feed/",                   "Europe",    False),
-    ("https://www.fly4free.com/flight-deals/asia-pacific/feed/",             "Asia",      False),
-    ("https://www.fly4free.com/flight-deals/latin-america-caribbean/feed/",  "Caribbean", False),
-    ("https://www.fly4free.com/error-fares/feed/",                           "Global",    True),
+    ("https://www.fly4free.com/feed/",                                      "Global", False),
+    ("https://www.fly4free.com/flight-deals/north-america/feed/",           "USA",    False),
+    ("https://www.fly4free.com/flight-deals/europe/feed/",                  "Europe", False),
 ]
 
 
@@ -326,11 +375,9 @@ async def scrape_holidaypirates(client: httpx.AsyncClient) -> list[Deal]:
 
 # Travelzoo — 3 feeds ─────────────────────────────────────────────────────────
 TRAVELZOO_FEEDS = [
-    ("https://www.travelzoo.com/rss/deals/flights/",        "Global"),
-    ("https://www.travelzoo.com/rss/deals/flights/us/",     "USA"),
-    ("https://www.travelzoo.com/rss/deals/flights/europe/", "Europe"),
-    ("https://www.travelzoo.com/rss/deals/hotels/",         "Hotel"),
-    ("https://www.travelzoo.com/rss/deals/cruises/",        "Cruise"),
+    ("https://www.travelzoo.com/rss/",                  "Global"),
+    ("https://www.travelzoo.com/rss/top20/us/",         "USA"),
+    ("https://www.travelzoo.com/rss/top20/uk/",         "Europe"),
 ]
 
 
@@ -349,9 +396,7 @@ async def scrape_travelzoo(client: httpx.AsyncClient) -> list[Deal]:
 
 # ThePointsGuy — deal-filtered ────────────────────────────────────────────────
 TPG_FEEDS = [
-    ("https://thepointsguy.com/feed/",              "Global"),
-    ("https://thepointsguy.com/deals/feed/",        "Global"),
-    ("https://thepointsguy.com/guide/cheap-flights/feed/", "Global"),
+    ("https://thepointsguy.com/feed/", "Global"),
 ]
 
 
@@ -371,9 +416,7 @@ async def scrape_thepointsguy(client: httpx.AsyncClient) -> list[Deal]:
 # View from the Wing — deal-filtered ──────────────────────────────────────────
 async def scrape_viewfromthewing(client: httpx.AsyncClient) -> list[Deal]:
     feeds = [
-        ("https://viewfromthewing.com/feed/",                          "Global"),
-        ("https://viewfromthewing.com/category/deals/feed/",           "Global"),
-        ("https://viewfromthewing.com/category/airfare-deals/feed/",   "Global"),
+        ("https://viewfromthewing.com/feed/", "Global"),
     ]
     deals: list[Deal] = []
     for url, region in feeds:
@@ -390,9 +433,7 @@ async def scrape_viewfromthewing(client: httpx.AsyncClient) -> list[Deal]:
 # One Mile at a Time — deal-filtered ──────────────────────────────────────────
 async def scrape_onemileatatime(client: httpx.AsyncClient) -> list[Deal]:
     feeds = [
-        ("https://onemileatatime.com/feed/",                         "Global"),
-        ("https://onemileatatime.com/category/deals/feed/",          "Global"),
-        ("https://onemileatatime.com/category/flight-deals/feed/",   "Global"),
+        ("https://onemileatatime.com/feed/", "Global"),
     ]
     deals: list[Deal] = []
     for url, region in feeds:
@@ -412,7 +453,8 @@ REDDIT_SUBS = [
     ("flightdeals",  "Global", False, False),   # 100% deals
     ("Flights",      "Global", False, True),    # mixed, filter
     ("CruiseDeals",  "Cruise", False, False),   # 100% cruise deals
-    ("HotelDeals",   "Hotel",  False, False),   # 100% hotel deals
+    ("hotels",       "Hotel",  False, True),    # filter for deals
+    ("TravelDeals",  "Global", False, False),   # travel deals
     ("travel",       "Global", False, True),    # filter
     ("solotravel",   "Global", False, True),    # filter
     ("awardtravel",  "Global", False, True),    # filter
@@ -457,6 +499,7 @@ async def scrape_reddit(client: httpx.AsyncClient) -> list[Deal]:
                     url           = href,
                     price         = extract_price(full),
                     region        = region,
+                    deal_type     = detect_deal_type(full, region),
                     is_error_fare = force_error or is_error_fare(full),
                     published     = pub,
                     description   = body[:300],
@@ -518,6 +561,7 @@ async def scrape_airfarewatchdog(_: httpx.AsyncClient) -> list[Deal]:
                         url           = href,
                         price         = extract_price(text),
                         region        = "USA",
+                        deal_type     = detect_deal_type(text, "USA"),
                         is_error_fare = is_error_fare(title),
                         published     = datetime.now(timezone.utc).isoformat(),
                     ))
@@ -542,6 +586,7 @@ async def scrape_airfarewatchdog(_: httpx.AsyncClient) -> list[Deal]:
                 url           = href,
                 price         = price,
                 region        = "USA",
+                deal_type     = detect_deal_type(title, "USA"),
                 is_error_fare = is_error_fare(title),
                 published     = datetime.now(timezone.utc).isoformat(),
             ))
@@ -580,6 +625,7 @@ async def scrape_manyflights(client: httpx.AsyncClient) -> list[Deal]:
                 url           = href,
                 price         = price,
                 region        = "Global",
+                deal_type     = detect_deal_type(title, "Global"),
                 is_error_fare = is_error_fare(title),
                 published     = datetime.now(timezone.utc).isoformat(),
             ))
@@ -618,6 +664,7 @@ async def scrape_flightlist(client: httpx.AsyncClient) -> list[Deal]:
                     url           = href,
                     price         = price,
                     region        = "Global",
+                    deal_type     = detect_deal_type(title, "Global"),
                     is_error_fare = is_error_fare(title),
                     published     = datetime.now(timezone.utc).isoformat(),
                 ))
@@ -658,6 +705,7 @@ async def scrape_wandr(client: httpx.AsyncClient) -> list[Deal]:
                     url           = href,
                     price         = price,
                     region        = "Global",
+                    deal_type     = detect_deal_type(title, "Global"),
                     is_error_fare = is_error_fare(title),
                     published     = datetime.now(timezone.utc).isoformat(),
                 ))

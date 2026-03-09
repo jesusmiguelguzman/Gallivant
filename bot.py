@@ -607,6 +607,7 @@ TG_URL           = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 TG_UPDATES_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
 TG_ANSWER_CB_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
 TG_SET_CMDS_URL  = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
+TG_EDIT_URL      = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
 
 # ─── Inline keyboards ─────────────────────────────────────────────────────────
 
@@ -619,6 +620,9 @@ HOME_KEYBOARD = {
         [
             {"text": "🗺️ Meandering",   "callback_data": "menu:meandering"},
             {"text": "🔍 Mulling",       "callback_data": "menu:mulling"},
+        ],
+        [
+            {"text": "🗺️ Wandering",    "callback_data": "menu:wandering"},
         ],
     ]
 }
@@ -753,18 +757,64 @@ async def send_text(
     await client.post(TG_URL, json=payload)
 
 
-async def answer_callback(client: httpx.AsyncClient, callback_query_id: str) -> None:
-    await client.post(TG_ANSWER_CB_URL, json={"callback_query_id": callback_query_id})
+async def edit_text(
+    client: httpx.AsyncClient,
+    chat_id: int | str,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: dict | None = None,
+) -> None:
+    payload: dict = {
+        "chat_id":                  chat_id,
+        "message_id":               message_id,
+        "text":                     text,
+        "parse_mode":               "Markdown",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    await client.post(TG_EDIT_URL, json=payload)
+
+
+async def answer_callback(
+    client: httpx.AsyncClient,
+    callback_query_id: str,
+    *,
+    text: str | None = None,
+) -> None:
+    payload: dict = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    await client.post(TG_ANSWER_CB_URL, json=payload)
 
 
 # ─── Command handlers ─────────────────────────────────────────────────────────
 
-async def cmd_ver_todos(client: httpx.AsyncClient, chat_id: int | str) -> None:
+async def _respond(
+    client: httpx.AsyncClient,
+    chat_id: int | str,
+    text: str,
+    *,
+    message_id: int | None = None,
+    silent: bool = True,
+    reply_markup: dict | None = None,
+) -> None:
+    """Edita el mensaje existente si viene de un botón, envía nuevo si viene de un comando."""
+    if message_id:
+        await edit_text(client, chat_id, message_id, text, reply_markup=reply_markup)
+    else:
+        await send_text(client, chat_id, text, silent=silent, reply_markup=reply_markup)
+
+
+async def cmd_ver_todos(
+    client: httpx.AsyncClient, chat_id: int | str, *, message_id: int | None = None
+) -> None:
     digest_state = load_digest_state()
     deals = digest_state.get("deals", [])
     if not deals:
-        await send_text(client, chat_id, "📭 No hay deals registrados hoy todavía.",
-                        silent=True, reply_markup=HOME_KEYBOARD)
+        await _respond(client, chat_id, "📭 No hay deals registrados hoy todavía.",
+                       message_id=message_id, reply_markup=HOME_KEYBOARD)
         return
     lines = [f"📋 *Deals de hoy* — {len(deals)} encontrados\n"]
     for d in sorted(deals, key=lambda x: -x["tier_level"])[:15]:
@@ -774,20 +824,22 @@ async def cmd_ver_todos(client: httpx.AsyncClient, chat_id: int | str) -> None:
             f"{d['tier_emoji']} {md_esc(d['title'])}: {md_esc(d['price'])} "
             f"_({tier_short}{pct_str})_"
         )
-    await send_text(client, chat_id, "\n".join(lines), silent=True, reply_markup=HOME_KEYBOARD)
+    await _respond(client, chat_id, "\n".join(lines), message_id=message_id, reply_markup=HOME_KEYBOARD)
 
 
-async def cmd_mis_rutas(client: httpx.AsyncClient, chat_id: int | str) -> None:
-    await send_text(
+async def cmd_mis_rutas(
+    client: httpx.AsyncClient, chat_id: int | str, *, message_id: int | None = None
+) -> None:
+    await _respond(
         client, chat_id,
         "🗺️ *Meandering* — Próximamente podrás guardar rutas favoritas "
         "y recibir alertas personalizadas.",
-        silent=True, reply_markup=HOME_KEYBOARD,
+        message_id=message_id, reply_markup=HOME_KEYBOARD,
     )
 
 
 async def cmd_pausar(
-    client: httpx.AsyncClient, chat_id: int | str, prefs: dict
+    client: httpx.AsyncClient, chat_id: int | str, prefs: dict, *, message_id: int | None = None
 ) -> None:
     now = datetime.now(timezone.utc)
     paused_until = prefs.get("paused_until")
@@ -796,30 +848,29 @@ async def cmd_pausar(
         if paused_dt > now:
             prefs["paused_until"] = None
             save_prefs(prefs)
-            await send_text(client, chat_id, "🔔 Alertas reactivadas.",
-                            silent=True, reply_markup=HOME_KEYBOARD)
+            await _respond(client, chat_id, "🔔 Alertas reactivadas.",
+                           message_id=message_id, reply_markup=HOME_KEYBOARD)
             return
     until = (now + timedelta(hours=24)).isoformat()
     prefs["paused_until"] = until
     save_prefs(prefs)
-    await send_text(
+    await _respond(
         client, chat_id,
         "🔕 Alertas pausadas por 24 horas. Toca *Lollygagging* de nuevo para reactivarlas.",
-        silent=True, reply_markup=HOME_KEYBOARD,
+        message_id=message_id, reply_markup=HOME_KEYBOARD,
     )
 
 
 async def cmd_mute_ruta(
-    client: httpx.AsyncClient, chat_id: int | str, deal_id: str
+    client: httpx.AsyncClient, callback_query_id: str, deal_id: str
 ) -> None:
-    await send_text(
-        client, chat_id,
-        "🔕 Ruta silenciada. No recibirás más alertas para deals similares.",
-        silent=True, reply_markup=HOME_KEYBOARD,
-    )
+    """Ghosting — muestra un toast en el botón, sin crear burbuja nueva."""
+    await answer_callback(client, callback_query_id, text="🔕 Ruta silenciada.")
 
 
-async def cmd_mulling(client: httpx.AsyncClient, chat_id: int | str) -> None:
+async def cmd_mulling(
+    client: httpx.AsyncClient, chat_id: int | str, *, message_id: int | None = None
+) -> None:
     prefs = load_prefs()
     paused_until = prefs.get("paused_until")
     if paused_until:
@@ -827,42 +878,70 @@ async def cmd_mulling(client: httpx.AsyncClient, chat_id: int | str) -> None:
         now = datetime.now(timezone.utc)
         if paused_dt > now:
             hours = int((paused_dt - now).total_seconds() // 3600)
-            await send_text(client, chat_id,
-                            f"🔕 Alertas pausadas — {hours}h restantes.",
-                            silent=True, reply_markup=HOME_KEYBOARD)
+            await _respond(client, chat_id, f"🔕 Alertas pausadas — {hours}h restantes.",
+                           message_id=message_id, reply_markup=HOME_KEYBOARD)
             return
     digest_state = load_digest_state()
     deals_today = len(digest_state.get("deals", []))
-    await send_text(
+    await _respond(
         client, chat_id,
         f"✅ *Gallivant* está despierto y cazando.\n"
         f"📋 Deals encontrados hoy: *{deals_today}*",
-        silent=True, reply_markup=HOME_KEYBOARD,
+        message_id=message_id, reply_markup=HOME_KEYBOARD,
     )
+
+
+_WANDERING_TEXT = (
+    "🗺️ *Wandering — el idioma de Gallivant*\n\n"
+    "🛫 *Skedaddling* — ver los deals de hoy\n"
+    "🔕 *Lollygagging* — pausar o reactivar alertas\n"
+    "🗺️ *Meandering* — mis rutas favoritas _(próximamente)_\n"
+    "🔍 *Mulling* — estado del bot\n"
+    "🔕 *Ghosting* — silenciar un deal puntual\n"
+    "✈️ *Gallivanting* — volver al inicio\n\n"
+    "🌧️ *Drizzle Deal* — deal decente, no urgente\n"
+    "🍲 *Simmering Save* — vale la pena, guardalo\n"
+    "🔥 *Flambé Fare* — oferta fuerte, revisalo ya\n"
+    "🤯 *Hullabaloo Deal* — error fare o precio insano, skedaddle ahora"
+)
+
+
+async def cmd_wandering(
+    client: httpx.AsyncClient, chat_id: int | str, *, message_id: int | None = None
+) -> None:
+    await _respond(client, chat_id, _WANDERING_TEXT,
+                   message_id=message_id, reply_markup=HOME_KEYBOARD)
 
 
 async def dispatch_callback(
     client: httpx.AsyncClient,
     callback_query_id: str,
     chat_id: int | str,
+    message_id: int,
     data: str,
     prefs: dict,
 ) -> None:
+    if data.startswith("mute:"):
+        # Toast en el botón — sin burbuja, sin editar el deal
+        await cmd_mute_ruta(client, callback_query_id, data[5:])
+        return
+
     await answer_callback(client, callback_query_id)
+
     if data == "menu:home":
-        await send_text(client, chat_id,
+        await edit_text(client, chat_id, message_id,
                         "✈️ *Gallivant* — Hunting error fares & cheap flights.",
-                        silent=True, reply_markup=HOME_KEYBOARD)
+                        reply_markup=HOME_KEYBOARD)
     elif data == "menu:skedaddling":
-        await cmd_ver_todos(client, chat_id)
+        await cmd_ver_todos(client, chat_id, message_id=message_id)
     elif data == "menu:lollygagging":
-        await cmd_pausar(client, chat_id, prefs)
+        await cmd_pausar(client, chat_id, prefs, message_id=message_id)
     elif data == "menu:meandering":
-        await cmd_mis_rutas(client, chat_id)
+        await cmd_mis_rutas(client, chat_id, message_id=message_id)
     elif data == "menu:mulling":
-        await cmd_mulling(client, chat_id)
-    elif data.startswith("mute:"):
-        await cmd_mute_ruta(client, chat_id, data[5:])
+        await cmd_mulling(client, chat_id, message_id=message_id)
+    elif data == "menu:wandering":
+        await cmd_wandering(client, chat_id, message_id=message_id)
 
 
 async def dispatch_command(
@@ -896,6 +975,8 @@ async def dispatch_command(
         await cmd_mis_rutas(client, chat_id)
     elif cmd == "/mulling":
         await cmd_mulling(client, chat_id)
+    elif cmd == "/wandering":
+        await cmd_wandering(client, chat_id)
 
 
 async def handle_updates(client: httpx.AsyncClient, prefs: dict) -> None:
@@ -915,7 +996,8 @@ async def handle_updates(client: httpx.AsyncClient, prefs: dict) -> None:
             cb_id   = cb["id"]
             cb_data = cb.get("data", "")
             chat_id = cb["message"]["chat"]["id"]
-            await dispatch_callback(client, cb_id, chat_id, cb_data, prefs)
+            msg_id  = cb["message"]["message_id"]
+            await dispatch_callback(client, cb_id, chat_id, msg_id, cb_data, prefs)
         elif "message" in update:
             msg     = update["message"]
             text    = msg.get("text", "")
@@ -1596,6 +1678,7 @@ async def set_commands() -> None:
         {"command": "lollygagging", "description": "Dawdling around and taking a breather from deal alerts."},
         {"command": "mulling",      "description": "Mulling over sources and reporting back on what's cooking."},
         {"command": "meandering",   "description": "Drifting through your saved routes, wherever they may lead."},
+        {"command": "wandering",    "description": "Lost in translation? A guide to Gallivant's lingo."},
     ]
     async with httpx.AsyncClient(timeout=10) as client:
         await client.post(TG_SET_CMDS_URL, json={"commands": commands})

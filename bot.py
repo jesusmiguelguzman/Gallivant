@@ -385,17 +385,17 @@ def detect_countries(text: str) -> list[tuple[str, str]]:
 
 
 DEAL_TYPE_RULES: list[tuple[str, list[str]]] = [
-    ("Crucero",  ["cruise", "crucero", "ship", "sailing", "carnival", "norwegian", "royal caribbean", "msc ", "celebrity cruise"]),
+    ("Cruise",   ["cruise", "crucero", "ship", "sailing", "carnival", "norwegian", "royal caribbean", "msc ", "celebrity cruise"]),
     ("Hotel",    ["hotel", "resort", "hostel", "inn", "lodge", "motel", "accommodation", "stay", "nights", "night stay", "airbnb"]),
-    ("Paquete",  ["package", "vacation package", "holiday package", "all-inclusive", "all inclusive", "bundle"]),
-    ("Millas",   ["miles", "points", "millas", "puntos", "award", "redemption", "bonus miles", "frequent flyer"]),
-    ("Vuelo",    ["flight", "fly", "airline", "airfare", "roundtrip", "round trip", "nonstop", "one-way", "departure", "→", "->", " to "]),
+    ("Package",  ["package", "vacation package", "holiday package", "all-inclusive", "all inclusive", "bundle"]),
+    ("Miles",    ["miles", "points", "millas", "puntos", "award", "redemption", "bonus miles", "frequent flyer"]),
+    ("Flight",   ["flight", "fly", "airline", "airfare", "roundtrip", "round trip", "nonstop", "one-way", "departure", "→", "->", " to "]),
 ]
 
 
 def detect_deal_type(text: str, region: str) -> str:
     if region.lower() == "cruise":
-        return "Crucero"
+        return "Cruise"
     if region.lower() == "hotel":
         return "Hotel"
     tl = text.lower()
@@ -487,11 +487,11 @@ TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
 
 DEAL_TYPE_EMOJIS = {
-    "Vuelo":   "✈️",
+    "Flight":  "✈️",
     "Hotel":   "🏨",
-    "Crucero": "🚢",
-    "Paquete": "🧳",
-    "Millas":  "🎯",
+    "Cruise":  "🚢",
+    "Package": "🧳",
+    "Miles":   "🎯",
     "Deal":    "🔖",
 }
 
@@ -515,7 +515,7 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
         f"{type_emoji} *{md_esc(deal.title)}*",
         "",
         f"💰 *Precio:* {md_esc(deal.price)}",
-        f"🏷️ *Tipo:* {deal.deal_type} #{deal.deal_type}",
+        f"🏷️ #{deal.deal_type}",
     ]
 
     if countries:

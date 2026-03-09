@@ -7,8 +7,6 @@ RSS sources:  SecretFlying (10 feeds), Fly4free (6), TheFlightDeal (2),
               HolidayPirates (2), ThePointsGuy, ViewFromTheWing, OneMilleAtATime,
               Travelzoo (3)
 JS sources:   Airfarewatchdog (Playwright)
-JSON API:     Reddit (r/flightdeals, r/Flights, r/CruiseDeals, r/HotelDeals,
-                      r/travel, r/solotravel, r/awardtravel, r/churning)
 Scrape:       ManyFlights, Flightlist, Wandr
 """
 
@@ -17,9 +15,10 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import feedparser
@@ -33,6 +32,17 @@ CHAT_ID       = os.environ["CHAT_ID"]
 DATA_DIR      = Path(os.environ.get("DATA_DIR", "/data"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "1800"))
 
+# ─── Tier config ──────────────────────────────────────────────────────────────
+# MIN_TIER: "drizzle deal" | "simmering save" | "flambé fare" | "hullabaloo deal"
+# (also accepts short forms: drizzle | simmering | flambe | hullabaloo)
+_TIER_LEVELS = {
+    "drizzle deal": 0,    "drizzle": 0,
+    "simmering save": 1,  "simmering": 1,
+    "flambé fare": 2,     "flambe fare": 2, "flambé": 2, "flambe": 2,
+    "hullabaloo deal": 3, "hullabaloo": 3,
+}
+MIN_TIER_LEVEL = _TIER_LEVELS.get(os.environ.get("MIN_TIER", "drizzle deal").lower(), 0)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -40,8 +50,11 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-STATE_FILE = DATA_DIR / "seen_deals.json"
-MAX_SEEN   = 10_000
+STATE_FILE   = DATA_DIR / "seen_deals.json"
+DIGEST_FILE  = DATA_DIR / "daily_digest.json"
+PREFS_FILE   = DATA_DIR / "user_prefs.json"
+MAX_SEEN     = 10_000
+DIGEST_HOUR  = int(os.environ.get("DIGEST_HOUR", "20"))   # UTC hour to send daily digest
 
 HEADERS = {
     "User-Agent": (
@@ -54,10 +67,6 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
 }
 
-REDDIT_HEADERS = {
-    "User-Agent": "Gallivant/1.0 (flight deal alert bot; contact via github.com/jesusmiguelguzman/Gallivant)",
-    "Accept": "application/json",
-}
 
 # ─── Model ────────────────────────────────────────────────────────────────────
 @dataclass
@@ -78,6 +87,89 @@ ERROR_KEYWORDS = {
     "error fare", "mistake fare", "mistake", "glitch", "accidental",
     "misfiled", "pricing error", "error fares", "mistake deal",
 }
+
+# ─── Deal Tiers ───────────────────────────────────────────────────────────────
+# (name, emoji, level)  level 0 = lowest, 3 = highest
+TIERS = [
+    ("Drizzle Deal",    "🌧️", 0),
+    ("Simmering Save",  "🍲", 1),
+    ("Flambé Fare",     "🔥", 2),
+    ("Hullabaloo Deal", "🤯", 3),
+]
+
+# Keywords that bump a deal to a higher tier (checked in order Hullabaloo → Simmering)
+_HULLABALOO_KW = {
+    "error fare", "mistake fare", "glitch fare", "accidental fare", "misfiled fare",
+    "pricing error", "too good to be true", "unbelievable deal",
+}
+_FLAMBE_KW = {
+    "flash sale", "massive discount", "incredible deal", "insane deal",
+    "steal of the century", "ridiculously cheap", "jaw-dropping", "once in a lifetime",
+    "limited time offer", "mega sale",
+}
+_SIMMERING_KW = {
+    "great deal", "good deal", "solid deal", "budget flight", "affordable",
+    "cheap flight", "discount fare", "bargain",
+}
+
+
+def _parse_pct(text: str) -> int | None:
+    """Extract the first explicit '% off' percentage found in text, or None."""
+    m = re.search(r"(\d{1,3})\s*%\s*off", text, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _parse_was_now(text: str) -> float | None:
+    """
+    Try to extract an implied discount % from 'was $X now $Y' patterns.
+    Returns a float 0-1, or None if not found / not a valid discount.
+    """
+    pat = re.search(
+        r"(?:was|from|regularly|normally|rrp|valued at)[^\d$€£]*[$€£]?([\d,]+)"
+        r".{1,40}?(?:now|for|only|just)[^\d$€£]*[$€£]?([\d,]+)",
+        text, re.IGNORECASE,
+    )
+    if pat:
+        original = float(pat.group(1).replace(",", ""))
+        current  = float(pat.group(2).replace(",", ""))
+        if original > 0 and 0 < current < original:
+            return (original - current) / original
+    return None
+
+
+def classify_tier(is_error_fare_flag: bool, title: str, description: str) -> tuple[str, str, int]:
+    """Return (tier_name, tier_emoji, tier_level) for a deal."""
+    full = f"{title} {description}".lower()
+
+    # Error-fare flag → always Hullabaloo
+    if is_error_fare_flag:
+        return TIERS[3]
+
+    # Explicit % off in text
+    # Drizzle ~20% | Simmering ~40% | Flambé ~60% | Hullabaloo ~80-90%
+    pct = _parse_pct(full)
+    if pct is not None:
+        if pct >= 75: return TIERS[3]   # 🤯 Hullabaloo Deal
+        if pct >= 50: return TIERS[2]   # 🔥 Flambé Fare
+        if pct >= 30: return TIERS[1]   # 🍲 Simmering Save
+        return TIERS[0]                 # 🌧️ Drizzle Deal
+
+    # Price-comparison pattern (was / now)
+    disc = _parse_was_now(full)
+    if disc is not None:
+        if disc >= 0.75: return TIERS[3]
+        if disc >= 0.50: return TIERS[2]
+        if disc >= 0.30: return TIERS[1]
+        return TIERS[0]
+
+    # Keyword heuristics
+    if any(kw in full for kw in _HULLABALOO_KW): return TIERS[3]
+    if any(kw in full for kw in _FLAMBE_KW):     return TIERS[2]
+    if any(kw in full for kw in _SIMMERING_KW):  return TIERS[1]
+
+    return TIERS[0]  # default: Drizzle
 
 # Source homepage URLs for the "Fuente" link
 SOURCE_URLS: dict[str, str] = {
@@ -482,9 +574,37 @@ def save_seen(seen: set[str]) -> None:
         lst = lst[-MAX_SEEN:]
     STATE_FILE.write_text(json.dumps(lst))
 
-# ─── Telegram ─────────────────────────────────────────────────────────────────
-TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
+def load_digest_state() -> dict:
+    if DIGEST_FILE.exists():
+        try:
+            return json.loads(DIGEST_FILE.read_text())
+        except Exception:
+            pass
+    return {"date": "", "deals": [], "total_scanned": 0, "sent": False}
+
+
+def save_digest_state(state: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DIGEST_FILE.write_text(json.dumps(state))
+
+
+def load_prefs() -> dict:
+    if PREFS_FILE.exists():
+        try:
+            return json.loads(PREFS_FILE.read_text())
+        except Exception:
+            pass
+    return {"paused_until": None, "update_offset": 0}
+
+
+def save_prefs(prefs: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PREFS_FILE.write_text(json.dumps(prefs))
+
+# ─── Telegram ─────────────────────────────────────────────────────────────────
+TG_URL         = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+TG_UPDATES_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
 
 DEAL_TYPE_EMOJIS = {
     "Flight":  "✈️",
@@ -495,43 +615,354 @@ DEAL_TYPE_EMOJIS = {
     "Deal":    "🔖",
 }
 
+# ─── Message helpers ──────────────────────────────────────────────────────────
+
+AIRLINE_NAMES = [
+    "American Airlines", "Delta", "United", "Southwest", "JetBlue",
+    "Alaska Airlines", "Spirit", "Frontier", "Hawaiian", "Sun Country",
+    "Lufthansa", "British Airways", "Air France", "KLM", "Iberia", "Swiss",
+    "Austrian", "Brussels Airlines", "Finnair", "SAS", "Norwegian",
+    "Ryanair", "EasyJet", "Wizz Air", "Vueling", "TAP", "Aer Lingus",
+    "Emirates", "Qatar Airways", "Etihad", "Turkish Airlines", "El Al",
+    "Singapore Airlines", "Cathay Pacific", "ANA", "JAL", "Korean Air",
+    "Asiana", "Thai Airways", "Vietnam Airlines", "Garuda",
+    "Philippine Airlines", "Malaysia Airlines", "Air India", "IndiGo",
+    "AirAsia", "Scoot", "Cebu Pacific",
+    "LATAM", "Avianca", "Copa Airlines", "Aeromexico", "Volaris",
+    "Sky Airline", "Air Canada", "WestJet", "Porter Airlines",
+    "Qantas", "Virgin Australia", "Air New Zealand",
+    "Ethiopian Airlines", "Kenya Airways", "Royal Air Maroc", "EgyptAir",
+    "South African Airways",
+]
+
+# Spanglish spinner words for the daily digest header
+SPELUNK_WORDS = [
+    "Fare-Spelunkeamos", "Deal-Sauteamos", "Price-Smoosheamos",
+    "Route-Gallivantamos", "Error-Sniffeamos", "Seat-Wrangleamos",
+    "Fare-Julienneamos", "Rate-Flambéamos", "Discount-Fermentamos",
+    "Airline-Befuddleamos", "Ticket-Moonwalkeamos", "Fare-Shenaniganeamos",
+    "Price-Combobulamos", "Deal-Percolamos", "Route-Zigzagueamos",
+]
+
+_MONTH_PAT = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
+
+
+def extract_dates(text: str) -> str | None:
+    """Extract a travel date range from deal text, e.g. 'Mar–May 2026'."""
+    patterns = [
+        rf"({_MONTH_PAT}[\s\d]*[-–—]{_MONTH_PAT}[\s,\d]{{0,6}}(?:20\d{{2}})?)",
+        rf"({_MONTH_PAT}\s+to\s+{_MONTH_PAT}(?:\s+20\d{{2}})?)",
+        rf"for travel\s+({_MONTH_PAT}[\s\d]*[-–—]{_MONTH_PAT}[\s,\d]{{0,6}}(?:20\d{{2}})?)",
+        rf"(?:valid|travel|fly)\s+(?:through|until|thru)\s+({_MONTH_PAT}(?:\s+20\d{{2}})?)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def extract_airline(text: str) -> str | None:
+    tl = text.lower()
+    for airline in AIRLINE_NAMES:
+        if airline.lower() in tl:
+            return airline
+    return None
+
+
+def extract_original_price(text: str) -> str | None:
+    """Look for 'was $X', 'normally $X', etc. and return formatted string."""
+    m = re.search(
+        r"(?:was|normally?|regular(?:ly)?|usual(?:ly)?|valued?\s+at|rrp|normal)[:\s]*"
+        r"([$€£])?([\d,]+(?:\.\d{2})?)",
+        text, re.IGNORECASE,
+    )
+    if m:
+        sym = m.group(1) or "$"
+        try:
+            n = float(m.group(2).replace(",", ""))
+            if n > 10:
+                return f"{sym}{int(n):,}" if n == int(n) else f"{sym}{n:,.0f}"
+        except ValueError:
+            pass
+    return None
+
+
+def extract_pct(text: str) -> str | None:
+    """Return formatted '−XX%' string if an explicit percentage is found."""
+    pct = _parse_pct(text)
+    if pct:
+        return f"−{pct}%"
+    disc = _parse_was_now(text)
+    if disc:
+        return f"−{int(disc * 100)}%"
+    return None
+
+
+def skedaddle_alert(tier_level: int) -> str | None:
+    if tier_level == 3:
+        return "⏰ *Skedaddle Alert:* estos duran 2-6 horas"
+    if tier_level == 2:
+        return "⏰ *Skedaddle Alert:* 24-48 horas antes de que vuele"
+    return None
+
+
+def _source_url(deal: Deal) -> str:
+    return SOURCE_URLS.get(deal.source, "")
+
+
+# ─── Telegram helpers ─────────────────────────────────────────────────────────
+
+async def send_text(
+    client: httpx.AsyncClient,
+    chat_id: int | str,
+    text: str,
+    *,
+    silent: bool = False,
+) -> None:
+    await client.post(TG_URL, json={
+        "chat_id":                  chat_id,
+        "text":                     text,
+        "parse_mode":               "Markdown",
+        "disable_web_page_preview": True,
+        "disable_notification":     silent,
+    })
+
+
+# ─── Command handlers ─────────────────────────────────────────────────────────
+
+async def cmd_ver_todos(client: httpx.AsyncClient, chat_id: int | str) -> None:
+    digest_state = load_digest_state()
+    deals = digest_state.get("deals", [])
+    if not deals:
+        await send_text(client, chat_id, "📭 No hay deals registrados hoy todavía.")
+        return
+    lines = [f"📋 *Deals de hoy* — {len(deals)} encontrados\n"]
+    for d in sorted(deals, key=lambda x: -x["tier_level"])[:15]:
+        pct_str = f", {d['pct']}" if d.get("pct") else ""
+        tier_short = d["tier_name"].split()[0]
+        lines.append(
+            f"{d['tier_emoji']} {md_esc(d['title'])}: {md_esc(d['price'])} "
+            f"_({tier_short}{pct_str})_"
+        )
+    await send_text(client, chat_id, "\n".join(lines), silent=True)
+
+
+async def cmd_mis_rutas(client: httpx.AsyncClient, chat_id: int | str) -> None:
+    await send_text(
+        client, chat_id,
+        "⚙️ *Mis rutas* — Próximamente podrás guardar rutas favoritas "
+        "y recibir alertas personalizadas.",
+        silent=True,
+    )
+
+
+async def cmd_pausar(
+    client: httpx.AsyncClient, chat_id: int | str, prefs: dict
+) -> None:
+    now = datetime.now(timezone.utc)
+    paused_until = prefs.get("paused_until")
+    if paused_until:
+        paused_dt = datetime.fromisoformat(paused_until)
+        if paused_dt > now:
+            prefs["paused_until"] = None
+            save_prefs(prefs)
+            await send_text(client, chat_id, "🔔 Alertas reactivadas.", silent=True)
+            return
+    until = (now + timedelta(hours=24)).isoformat()
+    prefs["paused_until"] = until
+    save_prefs(prefs)
+    await send_text(
+        client, chat_id,
+        "🔕 Alertas pausadas por 24 horas.\n\n"
+        "Toca [Pausar alertas](https://t.me/GallivantBot?start=pause) "
+        "de nuevo para reactivarlas.",
+        silent=True,
+    )
+
+
+async def cmd_mute_ruta(
+    client: httpx.AsyncClient, chat_id: int | str, deal_id: str
+) -> None:
+    await send_text(
+        client, chat_id,
+        "🔕 Ruta silenciada. No recibirás más alertas para deals similares.",
+        silent=True,
+    )
+
+
+async def dispatch_command(
+    client: httpx.AsyncClient, chat_id: int | str, text: str, prefs: dict
+) -> None:
+    parts = text.strip().split(None, 1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if cmd == "/start":
+        if arg == "all":
+            await cmd_ver_todos(client, chat_id)
+        elif arg == "routes":
+            await cmd_mis_rutas(client, chat_id)
+        elif arg == "pause":
+            await cmd_pausar(client, chat_id, prefs)
+        elif arg.startswith("mute_"):
+            await cmd_mute_ruta(client, chat_id, arg[5:])
+        else:
+            await send_text(
+                client, chat_id,
+                "✈️ *Gallivant* — Hunting error fares & cheap flights.\n\n"
+                "Recibirás alertas automáticas cuando aparezcan nuevos deals.",
+                silent=True,
+            )
+
+
+async def handle_updates(client: httpx.AsyncClient, prefs: dict) -> None:
+    offset = prefs.get("update_offset", 0)
+    resp = await client.get(
+        TG_UPDATES_URL,
+        params={"offset": offset, "timeout": 10, "allowed_updates": ["message"]},
+        timeout=20,
+    )
+    data = resp.json()
+    if not data.get("ok"):
+        return
+    for update in data["result"]:
+        offset = update["update_id"] + 1
+        msg = update.get("message", {})
+        text = msg.get("text", "")
+        chat_id = msg.get("chat", {}).get("id")
+        if text and chat_id:
+            await dispatch_command(client, chat_id, text, prefs)
+    prefs["update_offset"] = offset
+    save_prefs(prefs)
+
+
+# ─── Telegram senders ─────────────────────────────────────────────────────────
 
 async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
+    # Check if alerts are paused
+    prefs = load_prefs()
+    paused_until = prefs.get("paused_until")
+    if paused_until:
+        if datetime.fromisoformat(paused_until) > datetime.now(timezone.utc):
+            log.info(f"  Alerts paused — skipping {deal.title}")
+            return
+
+    tier_name, tier_emoji, tier_level = classify_tier(
+        deal.is_error_fare, deal.title, deal.description
+    )
     type_emoji = DEAL_TYPE_EMOJIS.get(deal.deal_type, "🔖")
-    source_url = SOURCE_URLS.get(deal.source, "")
+    src_url    = _source_url(deal)
+    full_text  = f"{deal.title} {deal.description}"
 
-    if deal.source.startswith("Reddit"):
-        sub = deal.source.split("/")[-1] if "/" in deal.source else "flightdeals"
-        source_url = f"https://www.reddit.com/r/{sub}"
+    # ── Line 1: tier + deal type label ───────────────────────────────────────
+    type_label = "Error Fare" if deal.is_error_fare else deal.deal_type
+    tier_display = tier_name.upper() if tier_level == 3 else tier_name
+    header = f"{tier_emoji} *{tier_display}* · {type_label}"
 
-    full_text = f"{deal.title} {deal.description}"
-    countries = detect_countries(full_text)
+    # ── Line 2: title ─────────────────────────────────────────────────────────
+    title_line = f"{type_emoji} {md_esc(deal.title)}"
 
-    parts = []
-    if deal.is_error_fare:
-        parts += ["🚨 *ERROR FARE* 🚨", ""]
+    # ── Line 3: price (+ original if found) ──────────────────────────────────
+    orig = extract_original_price(full_text)
+    price_line = f"💰 {md_esc(deal.price)}"
+    if orig:
+        price_line += f" _(normal: ~{md_esc(orig)})_"
 
-    parts += [
-        f"{type_emoji} *{md_esc(deal.title)}*",
+    # ── Optional lines ────────────────────────────────────────────────────────
+    dates   = extract_dates(full_text)
+    airline = extract_airline(full_text)
+
+    if airline:
+        booking_tip = "⚡ Reserva DIRECTO con la aerolínea"
+    elif deal.deal_type == "Hotel":
+        booking_tip = "⚡ Verifica disponibilidad antes de reservar"
+    elif deal.deal_type == "Cruise":
+        booking_tip = "⚡ Confirma cabina disponible antes de reservar"
+    else:
+        booking_tip = "⚡ Confirma precio antes de completar la reserva"
+
+    alert = skedaddle_alert(tier_level)
+
+    # ── Footer: 3 links ───────────────────────────────────────────────────────
+    mute_link = f"https://t.me/GallivantBot?start=mute_{deal.deal_id}"
+    footer_links = [
+        f"[Reservar ahora]({deal.url})",
+        f"[Ver detalles]({src_url})" if src_url else None,
+        f"[Silenciar ruta]({mute_link})",
+    ]
+    footer = "🔗 " + " · ".join(p for p in footer_links if p)
+
+    # ── Assemble ──────────────────────────────────────────────────────────────
+    parts = [header, title_line, price_line]
+    if dates:
+        parts.append(f"📅 {md_esc(dates)}")
+    if airline:
+        parts.append(f"🛑 Aerolínea: {md_esc(airline)}")
+    parts.append(booking_tip)
+    if alert:
+        parts += ["", alert]
+    parts += ["", footer]
+
+    # Hullabaloo → audible push; everything else → silent
+    silent = tier_level < 3
+
+    resp = await client.post(TG_URL, json={
+        "chat_id":                  CHAT_ID,
+        "text":                     "\n".join(parts),
+        "parse_mode":               "Markdown",
+        "disable_web_page_preview": True,
+        "disable_notification":     silent,
+    })
+    resp.raise_for_status()
+
+
+async def send_daily_digest(client: httpx.AsyncClient, digest_deals: list[dict], total_scanned: int) -> None:
+    """Send the daily Simmering Saves digest."""
+    if not digest_deals:
+        return
+
+    # Pick dominant tier (highest level deal of the day)
+    top_level = max(d["tier_level"] for d in digest_deals)
+    _, top_emoji, _ = TIERS[top_level]
+    top_name = TIERS[top_level][0]
+
+    spinner = random.choice(SPELUNK_WORDS)
+    header  = f"{top_emoji} *{top_name.upper()}* · Resumen del día"
+
+    parts = [
+        header,
+        f"Hoy {spinner} {total_scanned:,} rutas.",
         "",
-        f"💰 *Precio:* {md_esc(deal.price)}",
-        f"🏷️ #{deal.deal_type}",
     ]
 
-    if countries:
-        parts.append("  ".join(f"{flag} {tag}" for flag, tag in countries))
+    # Show up to 8 best deals (sorted by tier desc, then first found)
+    shown = sorted(digest_deals, key=lambda d: -d["tier_level"])[:8]
+    for d in shown:
+        t_emoji = d["tier_emoji"]
+        pct_str = f", {d['pct']}" if d.get("pct") else ""
+        tier_short = d["tier_name"].split()[0]   # "Hullabaloo", "Flambé", etc.
+        parts.append(
+            f"{t_emoji} {md_esc(d['title'])}: {md_esc(d['price'])} "
+            f"_({tier_short}{pct_str})_"
+        )
 
     parts += [
-        f"📡 *Fuente:* [{deal.source}]({source_url})" if source_url else f"📡 *Fuente:* {deal.source}",
         "",
-        f"🔗 [Ver y reservar]({deal.url})",
+        "📊 [Ver todos](https://t.me/GallivantBot?start=all) · "
+        "⚙️ [Mis rutas](https://t.me/GallivantBot?start=routes) · "
+        "🔕 [Pausar alertas](https://t.me/GallivantBot?start=pause)",
     ]
 
     resp = await client.post(TG_URL, json={
         "chat_id":                  CHAT_ID,
         "text":                     "\n".join(parts),
         "parse_mode":               "Markdown",
-        "disable_web_page_preview": False,
+        "disable_web_page_preview": True,
+        "disable_notification":     False,   # digest always has sound
     })
     resp.raise_for_status()
 
@@ -739,74 +1170,6 @@ async def scrape_onemileatatime(client: httpx.AsyncClient) -> list[Deal]:
             log.info(f"  OneMilleAtATime [{url.split('/')[-2]}]: {len(d)}")
         except Exception as exc:
             log.warning(f"  OneMilleAtATime [{url}] failed: {exc}")
-    return deals
-
-# ─── Reddit JSON API ──────────────────────────────────────────────────────────
-
-REDDIT_SUBS = [
-    # (subreddit, region, force_error, deal_filter)
-    ("flightdeals",  "Global", False, False),   # 100% deals
-    ("Flights",      "Global", False, True),    # mixed, filter
-    ("CruiseDeals",  "Cruise", False, False),   # 100% cruise deals
-    ("hotels",       "Hotel",  False, True),    # filter for deals
-    ("TravelDeals",  "Global", False, False),   # travel deals
-    ("travel",       "Global", False, True),    # filter
-    ("solotravel",   "Global", False, True),    # filter
-    ("awardtravel",  "Global", False, True),    # filter
-    ("churning",     "Global", False, True),    # credit card deals, filter
-    ("vacationdeals","Global", False, False),   # 100% deals
-    ("deals",        "Global", False, True),    # broad, filter for travel
-]
-
-
-async def scrape_reddit(client: httpx.AsyncClient) -> list[Deal]:
-    deals: list[Deal] = []
-    for sub, region, force_error, deal_filter in REDDIT_SUBS:
-        url = f"https://www.reddit.com/r/{sub}/new.json?limit=25"
-        try:
-            r = await client.get(url, headers=REDDIT_HEADERS, timeout=20)
-            r.raise_for_status()
-            posts = r.json()["data"]["children"]
-            sub_deals: list[Deal] = []
-
-            for post in posts:
-                p     = post["data"]
-                title = p.get("title", "").strip()
-                href  = f"https://reddit.com{p.get('permalink', '')}"
-                body  = p.get("selftext", "")[:500]
-                full  = f"{title} {body}"
-
-                if deal_filter and not is_travel_deal(full):
-                    continue
-
-                # Skip meta/mod posts
-                if any(kw in title.lower() for kw in ("weekly thread", "megathread", "discussion", "question", "mod post")):
-                    continue
-
-                pub = datetime.fromtimestamp(
-                    p.get("created_utc", 0), tz=timezone.utc
-                ).isoformat()
-
-                sub_deals.append(Deal(
-                    deal_id       = make_id("reddit", p.get("id", href)),
-                    source        = f"Reddit r/{sub}",
-                    title         = title,
-                    url           = href,
-                    price         = extract_price(full),
-                    region        = region,
-                    deal_type     = detect_deal_type(full, region),
-                    is_error_fare = force_error or is_error_fare(full),
-                    published     = pub,
-                    description   = body[:300],
-                ))
-
-            deals.extend(sub_deals)
-            log.info(f"  Reddit r/{sub}: {len(sub_deals)}")
-            await asyncio.sleep(0.5)   # Reddit rate limit
-
-        except Exception as exc:
-            log.warning(f"  Reddit r/{sub} failed: {exc}")
-
     return deals
 
 # ─── Playwright scrapers (JavaScript-heavy sites) ─────────────────────────────
@@ -1023,7 +1386,7 @@ SCRAPERS = [
     ("ThePointsGuy",    scrape_thepointsguy),
     ("ViewFromTheWing", scrape_viewfromthewing),
     ("OneMilleAtATime", scrape_onemileatatime),
-    ("Reddit",          scrape_reddit),
+
     ("Airfarewatchdog", scrape_airfarewatchdog),   # Playwright — runs last
     ("ManyFlights",     scrape_manyflights),
     ("Flightlist",      scrape_flightlist),
@@ -1034,6 +1397,13 @@ SCRAPERS = [
 async def run_poll() -> None:
     seen         = load_seen()
     is_first_run = len(seen) == 0
+    now          = datetime.now(timezone.utc)
+    today        = now.strftime("%Y-%m-%d")
+    digest_state = load_digest_state()
+
+    # Reset digest state on new day
+    if digest_state["date"] != today:
+        digest_state = {"date": today, "deals": [], "total_scanned": 0, "sent": False}
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
         all_deals: list[Deal] = []
@@ -1044,13 +1414,30 @@ async def run_poll() -> None:
             all_deals.extend(deals)
 
         new_deals = [d for d in all_deals if d.deal_id not in seen]
-        log.info(f"Total: {len(all_deals)} | New: {len(new_deals)}")
+
+        # Update digest total (all deals scanned, not just new)
+        digest_state["total_scanned"] = max(digest_state["total_scanned"], len(all_deals))
+
+        # Apply tier filter (MIN_TIER env var)
+        if MIN_TIER_LEVEL > 0:
+            filtered = [
+                d for d in new_deals
+                if classify_tier(d.is_error_fare, d.title, d.description)[2] >= MIN_TIER_LEVEL
+            ]
+            log.info(
+                f"Total: {len(all_deals)} | New: {len(new_deals)} | "
+                f"After tier filter (≥{MIN_TIER_LEVEL}): {len(filtered)}"
+            )
+            new_deals = filtered
+        else:
+            log.info(f"Total: {len(all_deals)} | New: {len(new_deals)}")
 
         if is_first_run:
             log.info("First run — seeding state, no alerts sent.")
             for d in all_deals:
                 seen.add(d.deal_id)
             save_seen(seen)
+            save_digest_state(digest_state)
             return
 
         sent = 0
@@ -1059,6 +1446,21 @@ async def run_poll() -> None:
                 await send_deal(client, deal)
                 seen.add(deal.deal_id)
                 sent += 1
+
+                # Accumulate in digest (store lightweight summary)
+                t_name, t_emoji, t_level = classify_tier(
+                    deal.is_error_fare, deal.title, deal.description
+                )
+                full = f"{deal.title} {deal.description}"
+                digest_state["deals"].append({
+                    "title":      deal.title[:60],
+                    "price":      deal.price,
+                    "tier_name":  t_name,
+                    "tier_emoji": t_emoji,
+                    "tier_level": t_level,
+                    "pct":        extract_pct(full),
+                })
+
                 await asyncio.sleep(0.8)
             except Exception as exc:
                 log.error(f"  Send failed [{deal.deal_id}]: {exc}")
@@ -1066,9 +1468,20 @@ async def run_poll() -> None:
         log.info(f"Sent {sent} alert(s).")
         save_seen(seen)
 
+        # Send daily digest once DIGEST_HOUR is reached
+        if now.hour >= DIGEST_HOUR and not digest_state["sent"] and digest_state["deals"]:
+            log.info("Sending daily digest…")
+            try:
+                await send_daily_digest(client, digest_state["deals"], digest_state["total_scanned"])
+                digest_state["sent"] = True
+                log.info("Daily digest sent.")
+            except Exception as exc:
+                log.error(f"Digest send failed: {exc}")
 
-async def main() -> None:
-    log.info("✈️  Gallivant started")
+        save_digest_state(digest_state)
+
+
+async def poll_loop() -> None:
     while True:
         try:
             await run_poll()
@@ -1076,6 +1489,22 @@ async def main() -> None:
             log.error(f"Poll cycle error: {exc}")
         log.info(f"Sleeping {POLL_INTERVAL}s…")
         await asyncio.sleep(POLL_INTERVAL)
+
+
+async def updates_loop() -> None:
+    prefs = load_prefs()
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+        while True:
+            try:
+                await handle_updates(client, prefs)
+            except Exception as exc:
+                log.warning(f"Update loop error: {exc}")
+            await asyncio.sleep(3)
+
+
+async def main() -> None:
+    log.info("✈️  Gallivant started")
+    await asyncio.gather(poll_loop(), updates_loop())
 
 
 if __name__ == "__main__":

@@ -603,8 +603,25 @@ def save_prefs(prefs: dict) -> None:
     PREFS_FILE.write_text(json.dumps(prefs))
 
 # ─── Telegram ─────────────────────────────────────────────────────────────────
-TG_URL         = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-TG_UPDATES_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+TG_URL           = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+TG_UPDATES_URL   = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+TG_ANSWER_CB_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+TG_SET_CMDS_URL  = f"https://api.telegram.org/bot{BOT_TOKEN}/setMyCommands"
+
+# ─── Inline keyboards ─────────────────────────────────────────────────────────
+
+HOME_KEYBOARD = {
+    "inline_keyboard": [
+        [
+            {"text": "🛫 Skedaddling",  "callback_data": "menu:skedaddling"},
+            {"text": "🔕 Lollygagging", "callback_data": "menu:lollygagging"},
+        ],
+        [
+            {"text": "🗺️ Meandering",   "callback_data": "menu:meandering"},
+            {"text": "🔍 Mulling",       "callback_data": "menu:mulling"},
+        ],
+    ]
+}
 
 DEAL_TYPE_EMOJIS = {
     "Flight":  "✈️",
@@ -722,14 +739,22 @@ async def send_text(
     text: str,
     *,
     silent: bool = False,
+    reply_markup: dict | None = None,
 ) -> None:
-    await client.post(TG_URL, json={
+    payload: dict = {
         "chat_id":                  chat_id,
         "text":                     text,
         "parse_mode":               "Markdown",
         "disable_web_page_preview": True,
         "disable_notification":     silent,
-    })
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    await client.post(TG_URL, json=payload)
+
+
+async def answer_callback(client: httpx.AsyncClient, callback_query_id: str) -> None:
+    await client.post(TG_ANSWER_CB_URL, json={"callback_query_id": callback_query_id})
 
 
 # ─── Command handlers ─────────────────────────────────────────────────────────
@@ -738,7 +763,8 @@ async def cmd_ver_todos(client: httpx.AsyncClient, chat_id: int | str) -> None:
     digest_state = load_digest_state()
     deals = digest_state.get("deals", [])
     if not deals:
-        await send_text(client, chat_id, "📭 No hay deals registrados hoy todavía.")
+        await send_text(client, chat_id, "📭 No hay deals registrados hoy todavía.",
+                        silent=True, reply_markup=HOME_KEYBOARD)
         return
     lines = [f"📋 *Deals de hoy* — {len(deals)} encontrados\n"]
     for d in sorted(deals, key=lambda x: -x["tier_level"])[:15]:
@@ -748,15 +774,15 @@ async def cmd_ver_todos(client: httpx.AsyncClient, chat_id: int | str) -> None:
             f"{d['tier_emoji']} {md_esc(d['title'])}: {md_esc(d['price'])} "
             f"_({tier_short}{pct_str})_"
         )
-    await send_text(client, chat_id, "\n".join(lines), silent=True)
+    await send_text(client, chat_id, "\n".join(lines), silent=True, reply_markup=HOME_KEYBOARD)
 
 
 async def cmd_mis_rutas(client: httpx.AsyncClient, chat_id: int | str) -> None:
     await send_text(
         client, chat_id,
-        "⚙️ *Mis rutas* — Próximamente podrás guardar rutas favoritas "
+        "🗺️ *Meandering* — Próximamente podrás guardar rutas favoritas "
         "y recibir alertas personalizadas.",
-        silent=True,
+        silent=True, reply_markup=HOME_KEYBOARD,
     )
 
 
@@ -770,17 +796,16 @@ async def cmd_pausar(
         if paused_dt > now:
             prefs["paused_until"] = None
             save_prefs(prefs)
-            await send_text(client, chat_id, "🔔 Alertas reactivadas.", silent=True)
+            await send_text(client, chat_id, "🔔 Alertas reactivadas.",
+                            silent=True, reply_markup=HOME_KEYBOARD)
             return
     until = (now + timedelta(hours=24)).isoformat()
     prefs["paused_until"] = until
     save_prefs(prefs)
     await send_text(
         client, chat_id,
-        "🔕 Alertas pausadas por 24 horas.\n\n"
-        "Toca [Pausar alertas](https://t.me/GallivantBot?start=pause) "
-        "de nuevo para reactivarlas.",
-        silent=True,
+        "🔕 Alertas pausadas por 24 horas. Toca *Lollygagging* de nuevo para reactivarlas.",
+        silent=True, reply_markup=HOME_KEYBOARD,
     )
 
 
@@ -790,18 +815,64 @@ async def cmd_mute_ruta(
     await send_text(
         client, chat_id,
         "🔕 Ruta silenciada. No recibirás más alertas para deals similares.",
-        silent=True,
+        silent=True, reply_markup=HOME_KEYBOARD,
     )
+
+
+async def cmd_mulling(client: httpx.AsyncClient, chat_id: int | str) -> None:
+    prefs = load_prefs()
+    paused_until = prefs.get("paused_until")
+    if paused_until:
+        paused_dt = datetime.fromisoformat(paused_until)
+        now = datetime.now(timezone.utc)
+        if paused_dt > now:
+            hours = int((paused_dt - now).total_seconds() // 3600)
+            await send_text(client, chat_id,
+                            f"🔕 Alertas pausadas — {hours}h restantes.",
+                            silent=True, reply_markup=HOME_KEYBOARD)
+            return
+    digest_state = load_digest_state()
+    deals_today = len(digest_state.get("deals", []))
+    await send_text(
+        client, chat_id,
+        f"✅ *Gallivant* está despierto y cazando.\n"
+        f"📋 Deals encontrados hoy: *{deals_today}*",
+        silent=True, reply_markup=HOME_KEYBOARD,
+    )
+
+
+async def dispatch_callback(
+    client: httpx.AsyncClient,
+    callback_query_id: str,
+    chat_id: int | str,
+    data: str,
+    prefs: dict,
+) -> None:
+    await answer_callback(client, callback_query_id)
+    if data == "menu:home":
+        await send_text(client, chat_id,
+                        "✈️ *Gallivant* — Hunting error fares & cheap flights.",
+                        silent=True, reply_markup=HOME_KEYBOARD)
+    elif data == "menu:skedaddling":
+        await cmd_ver_todos(client, chat_id)
+    elif data == "menu:lollygagging":
+        await cmd_pausar(client, chat_id, prefs)
+    elif data == "menu:meandering":
+        await cmd_mis_rutas(client, chat_id)
+    elif data == "menu:mulling":
+        await cmd_mulling(client, chat_id)
+    elif data.startswith("mute:"):
+        await cmd_mute_ruta(client, chat_id, data[5:])
 
 
 async def dispatch_command(
     client: httpx.AsyncClient, chat_id: int | str, text: str, prefs: dict
 ) -> None:
     parts = text.strip().split(None, 1)
-    cmd = parts[0].lower()
+    cmd = parts[0].lower().split("@")[0]  # strip @BotName suffix
     arg = parts[1].strip() if len(parts) > 1 else ""
 
-    if cmd == "/start":
+    if cmd in ("/start", "/gallivanting"):
         if arg == "all":
             await cmd_ver_todos(client, chat_id)
         elif arg == "routes":
@@ -815,15 +886,23 @@ async def dispatch_command(
                 client, chat_id,
                 "✈️ *Gallivant* — Hunting error fares & cheap flights.\n\n"
                 "Recibirás alertas automáticas cuando aparezcan nuevos deals.",
-                silent=True,
+                silent=True, reply_markup=HOME_KEYBOARD,
             )
+    elif cmd == "/skedaddling":
+        await cmd_ver_todos(client, chat_id)
+    elif cmd == "/lollygagging":
+        await cmd_pausar(client, chat_id, prefs)
+    elif cmd == "/meandering":
+        await cmd_mis_rutas(client, chat_id)
+    elif cmd == "/mulling":
+        await cmd_mulling(client, chat_id)
 
 
 async def handle_updates(client: httpx.AsyncClient, prefs: dict) -> None:
     offset = prefs.get("update_offset", 0)
     resp = await client.get(
         TG_UPDATES_URL,
-        params={"offset": offset, "timeout": 10, "allowed_updates": ["message"]},
+        params={"offset": offset, "timeout": 10, "allowed_updates": ["message", "callback_query"]},
         timeout=20,
     )
     data = resp.json()
@@ -831,11 +910,18 @@ async def handle_updates(client: httpx.AsyncClient, prefs: dict) -> None:
         return
     for update in data["result"]:
         offset = update["update_id"] + 1
-        msg = update.get("message", {})
-        text = msg.get("text", "")
-        chat_id = msg.get("chat", {}).get("id")
-        if text and chat_id:
-            await dispatch_command(client, chat_id, text, prefs)
+        if "callback_query" in update:
+            cb      = update["callback_query"]
+            cb_id   = cb["id"]
+            cb_data = cb.get("data", "")
+            chat_id = cb["message"]["chat"]["id"]
+            await dispatch_callback(client, cb_id, chat_id, cb_data, prefs)
+        elif "message" in update:
+            msg     = update["message"]
+            text    = msg.get("text", "")
+            chat_id = msg.get("chat", {}).get("id")
+            if text and chat_id:
+                await dispatch_command(client, chat_id, text, prefs)
     prefs["update_offset"] = offset
     save_prefs(prefs)
 
@@ -887,15 +973,6 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
 
     alert = skedaddle_alert(tier_level)
 
-    # ── Footer: 3 links ───────────────────────────────────────────────────────
-    mute_link = f"https://t.me/GallivantBot?start=mute_{deal.deal_id}"
-    footer_links = [
-        f"[Reservar ahora]({deal.url})",
-        f"[Ver detalles]({src_url})" if src_url else None,
-        f"[Silenciar ruta]({mute_link})",
-    ]
-    footer = "🔗 " + " · ".join(p for p in footer_links if p)
-
     # ── Assemble ──────────────────────────────────────────────────────────────
     parts = [header, title_line, price_line]
     if dates:
@@ -905,7 +982,16 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
     parts.append(booking_tip)
     if alert:
         parts += ["", alert]
-    parts += ["", footer]
+
+    # ── Inline keyboard buttons ────────────────────────────────────────────────
+    btn_row1 = [{"text": "🔗 Reservar ahora", "url": deal.url}]
+    if src_url:
+        btn_row1.append({"text": "📰 Ver fuente", "url": src_url})
+    btn_row2 = [
+        {"text": "🔕 Ghosting",      "callback_data": f"mute:{deal.deal_id}"},
+        {"text": "✈️ Gallivanting",  "callback_data": "menu:home"},
+    ]
+    reply_markup = {"inline_keyboard": [btn_row1, btn_row2]}
 
     # Hullabaloo → audible push; everything else → silent
     silent = tier_level < 3
@@ -916,6 +1002,7 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
         "parse_mode":               "Markdown",
         "disable_web_page_preview": True,
         "disable_notification":     silent,
+        "reply_markup":             reply_markup,
     })
     resp.raise_for_status()
 
@@ -1502,8 +1589,22 @@ async def updates_loop() -> None:
             await asyncio.sleep(3)
 
 
+async def set_commands() -> None:
+    commands = [
+        {"command": "gallivanting", "description": "Roaming aimlessly until a steal smacks you in the face."},
+        {"command": "skedaddling",  "description": "Bolting through today's full haul of fares and error deals."},
+        {"command": "lollygagging", "description": "Dawdling around and taking a breather from deal alerts."},
+        {"command": "mulling",      "description": "Mulling over sources and reporting back on what's cooking."},
+        {"command": "meandering",   "description": "Drifting through your saved routes, wherever they may lead."},
+    ]
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.post(TG_SET_CMDS_URL, json={"commands": commands})
+    log.info("Commands registered.")
+
+
 async def main() -> None:
     log.info("✈️  Gallivant started")
+    await set_commands()
     await asyncio.gather(poll_loop(), updates_loop())
 
 

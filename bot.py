@@ -515,7 +515,7 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
         f"{type_emoji} *{md_esc(deal.title)}*",
         "",
         f"💰 *Precio:* {md_esc(deal.price)}",
-        f"🏷️ *Tipo:* {deal.deal_type}",
+        f"🏷️ *Tipo:* {deal.deal_type} #{deal.deal_type}",
     ]
 
     if countries:

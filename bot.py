@@ -333,26 +333,55 @@ CITY_COUNTRY: dict[str, str] = {
 }
 
 
-def detect_country(text: str) -> tuple[str, str] | None:
-    """Return (flag_emoji, hashtag) for the most relevant country found in text."""
+# Adjective forms → country key (e.g. "french" → "france")
+COUNTRY_ADJECTIVES: dict[str, str] = {
+    "french": "france", "italian": "italy", "spanish": "spain",
+    "german": "germany", "portuguese": "portugal", "greek": "greece",
+    "british": "united kingdom", "english": "united kingdom", "scottish": "scotland",
+    "irish": "ireland", "dutch": "netherlands", "belgian": "belgium",
+    "swiss": "switzerland", "austrian": "austria", "swedish": "sweden",
+    "norwegian": "norway", "danish": "denmark", "finnish": "finland",
+    "polish": "poland", "czech": "czech republic", "hungarian": "hungary",
+    "romanian": "romania", "turkish": "turkey", "russian": "russia",
+    "ukrainian": "ukraine", "icelandic": "iceland",
+    "japanese": "japan", "chinese": "china", "korean": "south korea",
+    "thai": "thailand", "vietnamese": "vietnam", "indonesian": "indonesia",
+    "filipino": "philippines", "malaysian": "malaysia", "singaporean": "singapore",
+    "indian": "india", "nepalese": "nepal",
+    "australian": "australia", "kiwi": "new zealand",
+    "mexican": "mexico", "colombian": "colombia", "peruvian": "peru",
+    "chilean": "chile", "argentinian": "argentina", "argentinean": "argentina",
+    "brazilian": "brazil", "cuban": "cuba", "jamaican": "cuba",
+    "moroccan": "morocco", "egyptian": "egypt", "kenyan": "kenya",
+    "south african": "south africa", "tanzanian": "tanzania",
+    "emirati": "united arab emirates", "saudi": "saudi arabia",
+    "qatari": "qatar", "israeli": "israel", "jordanian": "jordan",
+    "riviera": "france",   # French/Italian Riviera → defaults to France unless adj found
+}
+
+def detect_countries(text: str) -> list[tuple[str, str]]:
+    """Return list of (flag, hashtag) for ALL countries detected in text (up to 3)."""
     tl = text.lower()
+    found: dict[str, tuple[str, str]] = {}  # key → (flag, hashtag), deduped
 
-    # First pass: direct country name match (longest match wins)
-    best: tuple[str, str] | None = None
-    best_len = 0
+    # 1. Direct country name match
     for name, (flag, tag) in COUNTRY_MAP.items():
-        if name in tl and len(name) > best_len:
-            best = (flag, tag)
-            best_len = len(name)
-    if best:
-        return best
+        if name in tl:
+            found[tag] = (flag, tag)
 
-    # Second pass: city → country lookup
+    # 2. Adjective forms
+    for adj, country_key in COUNTRY_ADJECTIVES.items():
+        if adj in tl and country_key in COUNTRY_MAP:
+            flag, tag = COUNTRY_MAP[country_key]
+            found[tag] = (flag, tag)
+
+    # 3. City lookup
     for city, country_key in CITY_COUNTRY.items():
         if city in tl and country_key in COUNTRY_MAP:
-            return COUNTRY_MAP[country_key]
+            flag, tag = COUNTRY_MAP[country_key]
+            found[tag] = (flag, tag)
 
-    return None
+    return list(found.values())[:3]
 
 
 DEAL_TYPE_RULES: list[tuple[str, list[str]]] = [
@@ -476,7 +505,7 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
         source_url = f"https://www.reddit.com/r/{sub}"
 
     full_text = f"{deal.title} {deal.description}"
-    country   = detect_country(full_text)
+    countries = detect_countries(full_text)
 
     parts = []
     if deal.is_error_fare:
@@ -489,9 +518,8 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
         f"🏷️ *Tipo:* {deal.deal_type}",
     ]
 
-    if country:
-        flag, hashtag = country
-        parts.append(f"{flag} {hashtag}")
+    if countries:
+        parts.append("  ".join(f"{flag} {tag}" for flag, tag in countries))
 
     parts += [
         f"📡 *Fuente:* [{deal.source}]({source_url})" if source_url else f"📡 *Fuente:* {deal.source}",

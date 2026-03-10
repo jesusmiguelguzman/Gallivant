@@ -3,5 +3,5 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "python -u bot.py"
+startCommand = "python -u test_send_samples.py && python -u bot.py"
 restartPolicyType = "always"

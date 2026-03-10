@@ -622,10 +622,45 @@ HOME_KEYBOARD = {
             {"text": "🔍 Mulling",       "callback_data": "menu:mulling"},
         ],
         [
+            {"text": "📡 Fuentes",      "callback_data": "menu:fuentes"},
             {"text": "📖 Wandering",    "callback_data": "menu:wandering"},
         ],
     ]
 }
+
+SOURCES_LIST = [
+    "SecretFlying", "Fly4free", "TheFlightDeal", "HolidayPirates",
+    "Travelzoo", "ThePointsGuy", "ViewFromTheWing", "OneMilleAtATime",
+    "Airfarewatchdog", "ManyFlights", "Flightlist", "Wandr",
+]
+
+
+def sources_keyboard() -> dict:
+    """One button per source, 2 per row, with a Back button at the bottom."""
+    rows = []
+    row: list = []
+    for src in SOURCES_LIST:
+        row.append({"text": src, "callback_data": f"source:{src}"})
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([{"text": "◀️ Atrás", "callback_data": "menu:home"}])
+    return {"inline_keyboard": rows}
+
+
+def source_type_keyboard(source: str) -> dict:
+    """Sub-menu for a specific source: Flights, Hotels, Back."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✈️ Flights", "callback_data": f"src_deals:{source}:Flight"},
+                {"text": "🏨 Hotels",  "callback_data": f"src_deals:{source}:Hotel"},
+            ],
+            [{"text": "◀️ Atrás", "callback_data": "menu:fuentes"}],
+        ]
+    }
 
 DEAL_TYPE_EMOJIS = {
     "Flight":  "✈️",
@@ -656,13 +691,13 @@ AIRLINE_NAMES = [
     "South African Airways",
 ]
 
-# Spanglish spinner words for the daily digest header
+# Spinner words for the daily digest header
 SPELUNK_WORDS = [
-    "Fare-Spelunkeamos", "Deal-Sauteamos", "Price-Smoosheamos",
-    "Route-Gallivantamos", "Error-Sniffeamos", "Seat-Wrangleamos",
-    "Fare-Julienneamos", "Rate-Flambéamos", "Discount-Fermentamos",
-    "Airline-Befuddleamos", "Ticket-Moonwalkeamos", "Fare-Shenaniganeamos",
-    "Price-Combobulamos", "Deal-Percolamos", "Route-Zigzagueamos",
+    "Fare-Spelunking", "Deal-Sauteing", "Price-Smooshing",
+    "Route-Gallivanting", "Error-Sniffing", "Seat-Wrangling",
+    "Fare-Juliening", "Rate-Flambing", "Discount-Fermenting",
+    "Airline-Befuddling", "Ticket-Moonwalking", "Fare-Shenaniganing",
+    "Price-Combobulating", "Deal-Percolating", "Route-Zigzagging",
 ]
 
 _MONTH_PAT = (
@@ -800,7 +835,7 @@ async def _respond(
     silent: bool = True,
     reply_markup: dict | None = None,
 ) -> None:
-    """Edita el mensaje existente si viene de un botón, envía nuevo si viene de un comando."""
+    """Edits the existing message if triggered by a button, sends a new one if from a command."""
     if message_id:
         await edit_text(client, chat_id, message_id, text, reply_markup=reply_markup)
     else:
@@ -813,10 +848,10 @@ async def cmd_ver_todos(
     digest_state = load_digest_state()
     deals = digest_state.get("deals", [])
     if not deals:
-        await _respond(client, chat_id, "📭 No hay deals registrados hoy todavía.",
+        await _respond(client, chat_id, "📭 No deals logged today yet.",
                        message_id=message_id, reply_markup=HOME_KEYBOARD)
         return
-    lines = [f"📋 *Deals de hoy* — {len(deals)} encontrados\n"]
+    lines = [f"📋 *Today's Deals* — {len(deals)} found\n"]
     for d in sorted(deals, key=lambda x: -x["tier_level"])[:15]:
         pct_str = f", {d['pct']}" if d.get("pct") else ""
         tier_short = d["tier_name"].split()[0]
@@ -832,8 +867,8 @@ async def cmd_mis_rutas(
 ) -> None:
     await _respond(
         client, chat_id,
-        "🗺️ *Meandering* — Próximamente podrás guardar rutas favoritas "
-        "y recibir alertas personalizadas.",
+        "🗺️ *Meandering* — Coming soon: save favorite routes "
+        "and receive personalized alerts.",
         message_id=message_id, reply_markup=HOME_KEYBOARD,
     )
 
@@ -848,7 +883,7 @@ async def cmd_pausar(
         if paused_dt > now:
             prefs["paused_until"] = None
             save_prefs(prefs)
-            await _respond(client, chat_id, "🔔 Alertas reactivadas.",
+            await _respond(client, chat_id, "🔔 Alerts reactivated.",
                            message_id=message_id, reply_markup=HOME_KEYBOARD)
             return
     until = (now + timedelta(hours=24)).isoformat()
@@ -856,7 +891,7 @@ async def cmd_pausar(
     save_prefs(prefs)
     await _respond(
         client, chat_id,
-        "🔕 Alertas pausadas por 24 horas. Toca *Lollygagging* de nuevo para reactivarlas.",
+        "🔕 Alerts paused for 24 hours. Tap *Lollygagging* again to reactivate.",
         message_id=message_id, reply_markup=HOME_KEYBOARD,
     )
 
@@ -864,8 +899,8 @@ async def cmd_pausar(
 async def cmd_mute_ruta(
     client: httpx.AsyncClient, callback_query_id: str, deal_id: str
 ) -> None:
-    """Ghosting — muestra un toast en el botón, sin crear burbuja nueva."""
-    await answer_callback(client, callback_query_id, text="🔕 Ruta silenciada.")
+    """Ghosting — shows a toast on the button, without creating a new bubble."""
+    await answer_callback(client, callback_query_id, text="🔕 Route muted.")
 
 
 async def cmd_mulling(
@@ -878,32 +913,32 @@ async def cmd_mulling(
         now = datetime.now(timezone.utc)
         if paused_dt > now:
             hours = int((paused_dt - now).total_seconds() // 3600)
-            await _respond(client, chat_id, f"🔕 Alertas pausadas — {hours}h restantes.",
+            await _respond(client, chat_id, f"🔕 Alerts paused — {hours}h remaining.",
                            message_id=message_id, reply_markup=HOME_KEYBOARD)
             return
     digest_state = load_digest_state()
     deals_today = len(digest_state.get("deals", []))
     await _respond(
         client, chat_id,
-        f"✅ *Gallivant* está despierto y cazando.\n"
-        f"📋 Deals encontrados hoy: *{deals_today}*",
+        f"✅ *Gallivant* is awake and hunting.\n"
+        f"📋 Deals found today: *{deals_today}*",
         message_id=message_id, reply_markup=HOME_KEYBOARD,
     )
 
 
 _WANDERING_TEXT = (
-    "🗺️ *Wandering — el idioma de Gallivant*\n\n"
-    "🛫 *Skedaddling* — ver los deals de hoy\n"
-    "🔕 *Lollygagging* — pausar o reactivar alertas\n"
-    "🗺️ *Meandering* — mis rutas favoritas _(próximamente)_\n"
-    "📖 *Wandering* — este glosario\n"
-    "🔍 *Mulling* — estado del bot\n"
-    "🔕 *Ghosting* — silenciar un deal puntual\n"
-    "✈️ *Gallivanting* — volver al inicio\n\n"
-    "🌧️ *Drizzle Deal* — deal decente, no urgente\n"
-    "🍲 *Simmering Save* — vale la pena, guardalo\n"
-    "🔥 *Flambé Fare* — oferta fuerte, revisalo ya\n"
-    "🤯 *Hullabaloo Deal* — error fare o precio insano, skedaddle ahora"
+    "🗺️ *Wandering — Gallivant's glossary*\n\n"
+    "🛫 *Skedaddling* — see today's deals\n"
+    "🔕 *Lollygagging* — pause or reactivate alerts\n"
+    "🗺️ *Meandering* — my favorite routes _(coming soon)_\n"
+    "📖 *Wandering* — this glossary\n"
+    "🔍 *Mulling* — bot status\n"
+    "🔕 *Ghosting* — mute a specific deal\n"
+    "✈️ *Gallivanting* — back to home\n\n"
+    "🌧️ *Drizzle Deal* — decent deal, not urgent\n"
+    "🍲 *Simmering Save* — worth it, save it\n"
+    "🔥 *Flambé Fare* — strong offer, check it now\n"
+    "🤯 *Hullabaloo Deal* — error fare or insane price, skedaddle now"
 )
 
 
@@ -912,6 +947,65 @@ async def cmd_wandering(
 ) -> None:
     await _respond(client, chat_id, _WANDERING_TEXT,
                    message_id=message_id, reply_markup=HOME_KEYBOARD)
+
+
+async def cmd_fuentes(
+    client: httpx.AsyncClient, chat_id: int | str, *, message_id: int | None = None
+) -> None:
+    digest_state = load_digest_state()
+    deals = digest_state.get("deals", [])
+    # Count deals per source
+    counts: dict[str, int] = {}
+    for d in deals:
+        src = d.get("source", "?")
+        counts[src] = counts.get(src, 0) + 1
+    total = sum(counts.values())
+    text = f"📡 *Fuentes* — {total} deal(s) hoy\n\nSelecciona una fuente para ver sus últimos deals:"
+    await _respond(client, chat_id, text, message_id=message_id, reply_markup=sources_keyboard())
+
+
+async def cmd_source_menu(
+    client: httpx.AsyncClient, chat_id: int | str, message_id: int, source: str
+) -> None:
+    digest_state = load_digest_state()
+    deals = digest_state.get("deals", [])
+    src_deals = [d for d in deals if d.get("source") == source]
+    flights = sum(1 for d in src_deals if d.get("deal_type") == "Flight")
+    hotels  = sum(1 for d in src_deals if d.get("deal_type") == "Hotel")
+    text = (
+        f"📡 *{md_esc(source)}*\n\n"
+        f"Hoy: {len(src_deals)} deal(s) — {flights} vuelos · {hotels} hoteles\n\n"
+        "¿Qué quieres ver?"
+    )
+    await edit_text(client, chat_id, message_id, text, reply_markup=source_type_keyboard(source))
+
+
+async def cmd_source_deals(
+    client: httpx.AsyncClient, chat_id: int | str, message_id: int,
+    source: str, deal_type: str,
+) -> None:
+    digest_state = load_digest_state()
+    all_deals = digest_state.get("deals", [])
+    matching = [
+        d for d in all_deals
+        if d.get("source") == source and d.get("deal_type") == deal_type
+    ]
+    type_emoji = {"Flight": "✈️", "Hotel": "🏨"}.get(deal_type, "🔖")
+    if not matching:
+        text = f"📭 Sin {deal_type.lower()}s de {source} hoy."
+    else:
+        lines = [f"*{md_esc(source)}* — {type_emoji} {deal_type}s hoy\n"]
+        for d in sorted(matching, key=lambda x: -x["tier_level"])[:10]:
+            pct_str = f" _{d['pct']}_" if d.get("pct") else ""
+            lines.append(f"{d['tier_emoji']} {md_esc(d['title'])}: {md_esc(d['price'])}{pct_str}")
+        text = "\n".join(lines)
+    back_kb = {
+        "inline_keyboard": [
+            [{"text": "◀️ Atrás", "callback_data": f"source:{source}"}],
+            [{"text": "🏠 Home",  "callback_data": "menu:home"}],
+        ]
+    }
+    await edit_text(client, chat_id, message_id, text, reply_markup=back_kb)
 
 
 async def dispatch_callback(
@@ -923,7 +1017,7 @@ async def dispatch_callback(
     prefs: dict,
 ) -> None:
     if data.startswith("mute:"):
-        # Toast en el botón — sin burbuja, sin editar el deal
+        # Button toast — no new bubble, no deal edit
         await cmd_mute_ruta(client, callback_query_id, data[5:])
         return
 
@@ -943,6 +1037,14 @@ async def dispatch_callback(
         await cmd_mulling(client, chat_id, message_id=message_id)
     elif data == "menu:wandering":
         await cmd_wandering(client, chat_id, message_id=message_id)
+    elif data == "menu:fuentes":
+        await cmd_fuentes(client, chat_id, message_id=message_id)
+    elif data.startswith("source:"):
+        source = data[7:]
+        await cmd_source_menu(client, chat_id, message_id, source)
+    elif data.startswith("src_deals:"):
+        _, source, deal_type = data.split(":", 2)
+        await cmd_source_deals(client, chat_id, message_id, source, deal_type)
 
 
 async def dispatch_command(
@@ -965,7 +1067,7 @@ async def dispatch_command(
             await send_text(
                 client, chat_id,
                 "✈️ *Gallivant* — Hunting error fares & cheap flights.\n\n"
-                "Recibirás alertas automáticas cuando aparezcan nuevos deals.",
+                "You'll get automatic alerts when new deals appear.",
                 silent=True, reply_markup=HOME_KEYBOARD,
             )
     elif cmd == "/skedaddling":
@@ -1045,31 +1147,30 @@ async def send_deal(client: httpx.AsyncClient, deal: Deal) -> None:
     dates   = extract_dates(full_text)
     airline = extract_airline(full_text)
 
-    if airline:
-        booking_tip = "⚡ Reserva DIRECTO con la aerolínea"
-    elif deal.deal_type == "Hotel":
-        booking_tip = "⚡ Verifica disponibilidad antes de reservar"
-    elif deal.deal_type == "Cruise":
-        booking_tip = "⚡ Confirma cabina disponible antes de reservar"
-    else:
-        booking_tip = "⚡ Confirma precio antes de completar la reserva"
-
     alert = skedaddle_alert(tier_level)
 
-    # ── Assemble ──────────────────────────────────────────────────────────────
+    # ── Country hashtags ──────────────────────────────────────────────────────
+    countries = detect_countries(full_text)
+    country_tags = "  ".join(f"{flag} {tag}" for flag, tag in countries)
+
+    # ── Assemble (lean format) ────────────────────────────────────────────────
     parts = [header, title_line, price_line]
     if dates:
         parts.append(f"📅 {md_esc(dates)}")
     if airline:
-        parts.append(f"🛑 Aerolínea: {md_esc(airline)}")
-    parts.append(booking_tip)
+        parts.append(f"🛫 {md_esc(airline)}")
     if alert:
-        parts += ["", alert]
+        parts.append(alert)
+    # Footer: source + country hashtags on one line
+    footer = f"_{md_esc(deal.source)}_"
+    if country_tags:
+        footer += f"  {country_tags}"
+    parts.append(footer)
 
     # ── Inline keyboard buttons ────────────────────────────────────────────────
-    btn_row1 = [{"text": "🔗 Reservar ahora", "url": deal.url}]
+    btn_row1 = [{"text": "🔗 Book now", "url": deal.url}]
     if src_url:
-        btn_row1.append({"text": "📰 Ver fuente", "url": src_url})
+        btn_row1.append({"text": "📰 Source", "url": src_url})
     btn_row2 = [
         {"text": "🔕 Ghosting",      "callback_data": f"mute:{deal.deal_id}"},
         {"text": "✈️ Gallivanting",  "callback_data": "menu:home"},
@@ -1101,11 +1202,11 @@ async def send_daily_digest(client: httpx.AsyncClient, digest_deals: list[dict],
     top_name = TIERS[top_level][0]
 
     spinner = random.choice(SPELUNK_WORDS)
-    header  = f"{top_emoji} *{top_name.upper()}* · Resumen del día"
+    header  = f"{top_emoji} *{top_name.upper()}* · Daily Digest"
 
     parts = [
         header,
-        f"Hoy {spinner} {total_scanned:,} rutas.",
+        f"Today we went {spinner} across {total_scanned:,} routes.",
         "",
     ]
 
@@ -1122,9 +1223,9 @@ async def send_daily_digest(client: httpx.AsyncClient, digest_deals: list[dict],
 
     parts += [
         "",
-        "📊 [Ver todos](https://t.me/GallivantBot?start=all) · "
-        "⚙️ [Mis rutas](https://t.me/GallivantBot?start=routes) · "
-        "🔕 [Pausar alertas](https://t.me/GallivantBot?start=pause)",
+        "📊 [See all](https://t.me/GallivantBot?start=all) · "
+        "⚙️ [My routes](https://t.me/GallivantBot?start=routes) · "
+        "🔕 [Pause alerts](https://t.me/GallivantBot?start=pause)",
     ]
 
     resp = await client.post(TG_URL, json={
@@ -1629,6 +1730,8 @@ async def run_poll() -> None:
                     "tier_emoji": t_emoji,
                     "tier_level": t_level,
                     "pct":        extract_pct(full),
+                    "source":     deal.source,
+                    "deal_type":  deal.deal_type,
                 })
 
                 await asyncio.sleep(0.8)
